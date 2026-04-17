@@ -33,7 +33,6 @@ dist/
 # Runtime / local machine files
 # =========================
 **/daily_progress.json
-**/preference.ini
 **/startup_error.log
 *.log
 
@@ -52,8 +51,6 @@ dist/
 未处理的素材/
 
 # Legacy local folders
-准备上传_GitHub/
-不上传_GitHub/
 
 # =========================
 # Optional: archives generated during release
