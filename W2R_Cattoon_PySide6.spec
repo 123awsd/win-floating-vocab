@@ -2,7 +2,7 @@
 from pathlib import Path
 
 base_dir = Path('.').resolve()
-src_dir = base_dir / 'py程序'
+src_dir = base_dir / 'catword'
 datas = []
 for name in ('preference.ini', 'themes.ini', 'fonts.ini'):
     p = src_dir / name
@@ -14,7 +14,7 @@ if icon_file.exists():
     datas.append((str(icon_file), str(Path('assets') / 'app_icon')))
 
 a = Analysis(
-    ['py程序\\W2R.py'],
+    ['catword\\W2R.py'],
     pathex=[],
     binaries=[],
     datas=datas,

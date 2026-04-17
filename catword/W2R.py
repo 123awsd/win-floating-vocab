@@ -122,20 +122,77 @@ def _parse_bool(text: str, default: bool = False) -> bool:
     return default
 
 
+def _event_global_point(event) -> QPoint:
+    try:
+        return event.globalPosition().toPoint()
+    except AttributeError:
+        return event.globalPos()
+
+
+class DragHandleLabel(QLabel):
+    def __init__(self, text: str = "", target_window: QWidget = None, parent: QWidget = None):
+        super().__init__(text, parent)
+        self._target_window = target_window
+        self._dragging = False
+        self._drag_offset = QPoint()
+        self.setCursor(Qt.OpenHandCursor)
+
+    def _target(self):
+        return self._target_window if self._target_window is not None else self.window()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            target = self._target()
+            if target is not None:
+                self._dragging = True
+                self._drag_offset = _event_global_point(event) - target.frameGeometry().topLeft()
+                self.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and (event.buttons() & Qt.LeftButton):
+            target = self._target()
+            if target is not None:
+                target.move(_event_global_point(event) - self._drag_offset)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            self.setCursor(Qt.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+def _transparency_to_alpha(transparency: float) -> float:
+    # Keep a little visibility at max transparency so window remains operable.
+    return max(0.1, min(1.0, 1.0 - float(transparency)))
+
+
+def _alpha_to_transparency(alpha_value: float) -> float:
+    return max(0.0, min(1.0, 1.0 - float(alpha_value)))
+
+
 waitTime = 2.0
 default_lexicon = ""
-file = _p("鍗曡瘝琛?txt")
+file = _p("单词表.txt")
 bgcolor = "#FFEFD6"
 fgcolor = "#4D3B36"
 word_color = fgcolor
 counter_color = "#F7F0E8"
 ENGfont = "Consolas"
-CHNfont = "瀹嬩綋"
+CHNfont = "宋体"
 alpha = 0.96
 isFullScreen = 0
 auto_speak = 0
 order = 0
 handmode = 1
+tts_language = "en"
 
 ui_theme = "cattoon_v1"
 window_radius = 22
@@ -157,15 +214,17 @@ fonts = {
 DEFAULT_FONTS = dict(fonts)
 
 alphaValues = {
-    "100%": 1.0,
-    "95%": 0.95,
-    "90%": 0.9,
-    "85%": 0.85,
-    "80%": 0.8,
-    "75%": 0.75,
-    "70%": 0.7,
-    "60%": 0.6,
+    "0%": 0.0,
+    "10%": 0.1,
+    "20%": 0.2,
+    "30%": 0.3,
+    "40%": 0.4,
     "50%": 0.5,
+    "60%": 0.6,
+    "70%": 0.7,
+    "80%": 0.8,
+    "90%": 0.9,
+    "100%": 1.0,
 }
 DEFAULT_ALPHA_VALUES = dict(alphaValues)
 
@@ -173,6 +232,7 @@ lexicon = {}
 words = {}
 word_items = []
 word_index = 0
+detected_lexicon_lang = "en"
 
 _tts_worker_started = False
 _tts_lock = threading.Lock()
@@ -180,12 +240,16 @@ _tts_error_hint_shown = False
 _tts_latest_text = ""
 _tts_request_event = threading.Event()
 _tts_current_proc = None
+_tts_voice_missing_warned = set()
 
 _ENG_TTS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\s\-\+'/]*$")
 _HAS_LETTER_PATTERN = re.compile(r"[A-Za-z]")
 DAILY_PROGRESS_FILE = BASE_DIR / "daily_progress.json"
 daily_progress_date = ""
 daily_progress_count = 0
+LEARNING_PROGRESS_FILE = BASE_DIR / "learning_progress.json"
+lexicon_progress = {}
+lexicon_progress_loaded = False
 
 
 def _bundled_roots():
@@ -259,6 +323,15 @@ def _is_english_word(text):
     return bool(_ENG_TTS_PATTERN.fullmatch(text)) and bool(_HAS_LETTER_PATTERN.search(text))
 
 
+def _can_speak_text(text: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    if tts_language == "ja":
+        return True
+    return _is_english_word(text)
+
+
 def _normalize_tts_text(text: str) -> str:
     text = (text or "").replace("_", " ").strip()
     text = re.sub(r"\s+", " ", text)
@@ -323,18 +396,66 @@ def get_daily_progress_count() -> int:
     return int(daily_progress_count)
 
 
+def load_lexicon_progress() -> None:
+    global lexicon_progress, lexicon_progress_loaded
+    if lexicon_progress_loaded:
+        return
+    lexicon_progress_loaded = True
+    lexicon_progress = {}
+    try:
+        with open(LEARNING_PROGRESS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                try:
+                    lexicon_progress[str(k)] = max(0, int(v))
+                except (ValueError, TypeError):
+                    pass
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+
+
+def save_lexicon_progress() -> None:
+    try:
+        with open(LEARNING_PROGRESS_FILE, "w", encoding="utf-8") as f:
+            json.dump(lexicon_progress, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def get_lexicon_progress(name: str) -> int:
+    load_lexicon_progress()
+    return int(lexicon_progress.get(str(name or ""), 0))
+
+
+def set_lexicon_progress(name: str, index: int) -> None:
+    if not name:
+        return
+    load_lexicon_progress()
+    lexicon_progress[str(name)] = max(0, int(index))
+    save_lexicon_progress()
+
+
 def _build_tts_script():
     return (
         "$ErrorActionPreference='Stop';"
         "$text=$env:W2R_TTS_TEXT;"
+        "$lang=$env:W2R_TTS_LANG;"
         "if($text -cmatch '^[A-Z]{2,6}$'){ $text = (($text.ToCharArray()) -join ' ') };"
         "$v=New-Object -ComObject SAPI.SpVoice;"
         "$voices=$v.GetVoices();"
+        "$pattern='English|en-US|en-GB';"
+        "$langHex='409';"
+        "if($lang -eq 'ja'){ $pattern='Japanese|ja-JP|日本|日语'; $langHex='411' };"
+        "$matched=$false;"
         "for($i=0;$i -lt $voices.Count;$i++){"
         "  $vi=$voices.Item($i);"
         "  $d=$vi.GetDescription();"
-        "  if($d -match 'English|en-US|en-GB'){ $v.Voice=$vi; break }"
+        "  $langAttr='';"
+        "  try{ $langAttr=$vi.GetAttribute('Language') }catch{};"
+        "  if($d -match $pattern -or $langAttr -match $langHex){ $v.Voice=$vi; $matched=$true; break }"
         "};"
+        "if(-not $matched){ Write-Output '__W2R_NO_VOICE__' };"
         "$v.Rate = -2;"
         "[void]$v.Speak($text);"
     )
@@ -345,6 +466,7 @@ def _spawn_sapi_speak(text):
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     env = os.environ.copy()
     env["W2R_TTS_TEXT"] = text
+    env["W2R_TTS_LANG"] = tts_language
     return subprocess.Popen(
         [
             "powershell.exe",
@@ -360,6 +482,36 @@ def _spawn_sapi_speak(text):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _has_voice_for_language(lang: str) -> bool:
+    if lang != "ja":
+        return True
+    script = (
+        "$v=New-Object -ComObject SAPI.SpVoice;"
+        "$voices=$v.GetVoices();"
+        "$ok=$false;"
+        "for($i=0;$i -lt $voices.Count;$i++){"
+        "  $vi=$voices.Item($i);"
+        "  $d=$vi.GetDescription();"
+        "  $langAttr='';"
+        "  try{ $langAttr=$vi.GetAttribute('Language') }catch{};"
+        "  if($d -match 'Japanese|ja-JP|日本|日语' -or $langAttr -match '411'){ $ok=$true; break }"
+        "};"
+        "if($ok){'1'}else{'0'};"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        out = subprocess.check_output(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+            creationflags=creationflags,
+            stderr=subprocess.DEVNULL,
+            timeout=2.5,
+            text=True,
+        )
+        return out.strip().endswith("1")
+    except Exception:
+        return False
 
 
 def _stop_current_tts():
@@ -396,7 +548,7 @@ def _tts_worker_loop():
             except Exception as exc:
                 if not _tts_error_hint_shown:
                     _tts_error_hint_shown = True
-                    print(f"[TTS] 缁傝崵鍤庨張妤勵嚢娑撳秴褰查悽顭掔礉瀹歌尪鍤滈崝銊╂缁狙傝礋闂堟瑩绮妴鍌氬斧閸? {exc}")
+                    print(f"[TTS] 语音朗读不可用，请检查系统语音环境: {exc}")
                 break
 
             with _tts_lock:
@@ -429,12 +581,14 @@ def _ensure_tts_worker():
         _tts_worker_started = True
 
 
-def speak_word(text: str) -> None:
+def speak_word(text: str, restart: bool = False) -> None:
     global _tts_latest_text
     text = _normalize_tts_text(text)
-    if not _is_english_word(text):
+    if not _can_speak_text(text):
         return
     _ensure_tts_worker()
+    if restart:
+        _stop_current_tts()
     with _tts_lock:
         _tts_latest_text = text
     _tts_request_event.set()
@@ -445,6 +599,18 @@ def set_tts_enabled(flag: bool) -> None:
     auto_speak = 1 if flag else 0
     if not auto_speak:
         _stop_current_tts()
+
+
+def set_tts_language(lang: str) -> bool:
+    global tts_language
+    lang = (lang or "").strip().lower()
+    if lang not in {"en", "ja"}:
+        return False
+    if lang == "ja" and not _has_voice_for_language("ja"):
+        tts_language = "en"
+        return False
+    tts_language = lang
+    return True
 
 
 def loadLexiconByDir():
@@ -490,7 +656,7 @@ def _load_theme_file(path: str, target: dict):
 def readConfig():
     global auto_speak, waitTime, order, ENGfont, CHNfont, bgcolor, fgcolor, alpha
     global word_color, counter_color
-    global ui_theme, window_radius, font_scale, default_lexicon, file
+    global ui_theme, window_radius, font_scale, default_lexicon, file, tts_language
     global themeColors, fonts, alphaValues
     if not isinstance(themeColors, dict):
         themeColors = dict(DEFAULT_THEME_COLORS)
@@ -530,6 +696,17 @@ def readConfig():
         default_lexicon = extra_pairs.get("default_lexicon", default_lexicon).strip()
         word_color = extra_pairs.get("word_color", word_color or fgcolor).strip() or fgcolor
         counter_color = extra_pairs.get("counter_color", counter_color).strip() or "#F7F0E8"
+        tts_language = extra_pairs.get("tts_language", tts_language).strip().lower() or "en"
+        if tts_language not in {"en", "ja"}:
+            tts_language = "en"
+        # v2: user-facing "transparency" value, where larger means more transparent.
+        transparency_text = extra_pairs.get("transparency", "")
+        if transparency_text:
+            try:
+                transparency = max(0.0, min(1.0, float(transparency_text)))
+                alpha = _transparency_to_alpha(transparency)
+            except ValueError:
+                pass
 
         if default_lexicon and default_lexicon in lexicon:
             file = lexicon[default_lexicon]
@@ -570,6 +747,8 @@ def saveConfig(geometry_str: str, fs: int):
         f.write(f"default_lexicon={default_lexicon}\n")
         f.write(f"word_color={word_color}\n")
         f.write(f"counter_color={counter_color}\n")
+        f.write(f"tts_language={tts_language}\n")
+        f.write(f"transparency={_alpha_to_transparency(alpha):.2f}\n")
 
 
 def _parse_words_from_file(file_path: str):
@@ -599,8 +778,26 @@ def _parse_words_from_file(file_path: str):
     return loaded
 
 
+def _detect_language_from_terms(term_map: dict) -> str:
+    if not term_map:
+        return "en"
+    ja_hits = 0
+    en_hits = 0
+    ja_re = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\u4e00-\u9fff]")
+    en_re = re.compile(r"[A-Za-z]")
+    for idx, term in enumerate(term_map.keys()):
+        if idx >= 120:
+            break
+        text = str(term)
+        if ja_re.search(text):
+            ja_hits += 1
+        if en_re.search(text):
+            en_hits += 1
+    return "ja" if ja_hits > en_hits and ja_hits > 0 else "en"
+
+
 def getWord():
-    global file, words, word_items, word_index, default_lexicon
+    global file, words, word_items, word_index, default_lexicon, detected_lexicon_lang
 
     def _safe_exists(path_text: str) -> bool:
         try:
@@ -648,6 +845,7 @@ def getWord():
     default_lexicon = Path(file).stem
     word_items = list(words.items())
     word_index = 0
+    detected_lexicon_lang = _detect_language_from_terms(words)
     _log(f"getWord: final count={len(word_items)}")
 
 
@@ -666,7 +864,7 @@ class CatPopup(QDialog):
         card_layout.setContentsMargins(16, 12, 16, 12)
         card_layout.setSpacing(10)
 
-        t_label = QLabel(title)
+        t_label = DragHandleLabel(title, target_window=self)
         t_label.setObjectName("title")
         m_label = QLabel(content)
         m_label.setWordWrap(True)
@@ -728,7 +926,7 @@ class CatPopup(QDialog):
 
 
 class CuteColorDialog(QDialog):
-    def __init__(self, parent: QWidget, title: str, initial_hex: str, cat_pixmaps=None):
+    def __init__(self, parent: QWidget, title: str, initial_hex: str, cat_pixmaps=None, on_change=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
@@ -739,6 +937,7 @@ class CuteColorDialog(QDialog):
         initial = QColor(initial_hex or "#F7F0E8")
         self._selected = initial if initial.isValid() else QColor("#F7F0E8")
         self._updating = False
+        self._on_change = on_change
 
         self.card = QWidget()
         self.card.setObjectName("card")
@@ -748,7 +947,7 @@ class CuteColorDialog(QDialog):
 
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
-        title_label = QLabel(title + "  (RGB)")
+        title_label = DragHandleLabel(title + "  (RGB)", target_window=self)
         title_label.setObjectName("title")
         cat_pixmaps = [p for p in (cat_pixmaps or []) if p is not None and not p.isNull()]
         top_row.addWidget(title_label, 1)
@@ -885,6 +1084,8 @@ class CuteColorDialog(QDialog):
         self.b_value.setText(str(color.blue()))
         self._refresh_preview()
         self._updating = False
+        if callable(self._on_change):
+            self._on_change(self._selected)
 
     def _on_slider_changed(self, channel: str, value: int):
         if channel == "R":
@@ -942,8 +1143,8 @@ class CuteColorDialog(QDialog):
         self._layout_cat_decorations()
 
     @classmethod
-    def get_color(cls, parent: QWidget, title: str, initial_hex: str, cat_pixmaps=None):
-        dlg = cls(parent, title, initial_hex, cat_pixmaps=cat_pixmaps)
+    def get_color(cls, parent: QWidget, title: str, initial_hex: str, cat_pixmaps=None, on_change=None):
+        dlg = cls(parent, title, initial_hex, cat_pixmaps=cat_pixmaps, on_change=on_change)
         if hasattr(dlg, "exec"):
             ok = dlg.exec()
         else:
@@ -971,6 +1172,8 @@ class WordWindow(QWidget):
         self._word_color = word_color or fgcolor
         self._counter_color = counter_color
         self._fitting_fonts = False
+        self._history = []
+        self._history_pos = -1
         self._cat_pixmaps = self._load_cat_pixmaps()
         self._badge = self._cat_pixmaps[0] if self._cat_pixmaps else self._load_badge_pixmap()
         _log(f"cat assets loaded={len(self._cat_pixmaps)} frozen={getattr(sys, 'frozen', False)}")
@@ -1032,6 +1235,36 @@ class WordWindow(QWidget):
 
         self._apply_saved_geometry()
         self.next_word(force=True, count_progress=False)
+        self._apply_detected_tts_language(show_popup=False)
+
+    def _current_lexicon_name(self) -> str:
+        try:
+            return Path(file).stem
+        except Exception:
+            return ""
+
+    def _current_theme_name(self) -> str:
+        for name, colors in themeColors.items():
+            if len(colors) >= 2 and colors[0] == bgcolor and colors[1] == fgcolor:
+                return name
+        return ""
+
+    def _current_font_name(self) -> str:
+        for name, pair in fonts.items():
+            if len(pair) >= 2 and pair[0] == ENGfont and pair[1] == CHNfont:
+                return name
+        return ""
+
+    def _current_alpha_name(self) -> str:
+        current = _alpha_to_transparency(alpha)
+        best_name = next(iter(alphaValues.keys()))
+        best_diff = 10.0
+        for name, value in alphaValues.items():
+            d = abs(float(value) - current)
+            if d < best_diff:
+                best_diff = d
+                best_name = name
+        return best_name
 
     def _load_badge_pixmap(self):
         # Prefer PNG assets first. In frozen Windows builds, some Qt5 SVG
@@ -1246,14 +1479,24 @@ class WordWindow(QWidget):
         if not word_items:
             getWord()
         if not word_items:
-            return ("NoLexicon", "璇峰湪绋嬪簭鐩綍鏀惧叆璇嶅簱 .txt")
+            return ("NoLexicon", "请在程序目录放入词库 .txt")
         if order == 1:
             item = word_items[word_index % len(word_items)]
             word_index = (word_index + 1) % len(word_items)
             return item
         return random.choice(word_items)
 
-    def _apply_word(self, eng: str, chn: str, count_progress: bool = True):
+    def _push_history(self, eng: str, chn: str):
+        if self._history_pos < len(self._history) - 1:
+            self._history = self._history[: self._history_pos + 1]
+        self._history.append((eng, chn))
+        self._history_pos = len(self._history) - 1
+        if len(self._history) > 5000:
+            trim = len(self._history) - 5000
+            self._history = self._history[trim:]
+            self._history_pos = max(0, self._history_pos - trim)
+
+    def _apply_word(self, eng: str, chn: str, count_progress: bool = True, track_history: bool = True):
         self.eng_label.setText(eng)
         self.chn_label.setText(chn)
         self.chn_label.setAlignment(Qt.AlignLeft if len(chn) > 16 else Qt.AlignCenter)
@@ -1261,27 +1504,46 @@ class WordWindow(QWidget):
         if not self._safe_visible_mode:
             QTimer.singleShot(0, self._fit_current_text_fonts)
         self._randomize_cat()
+        if track_history:
+            self._push_history(eng, chn)
         if count_progress:
             self._increment_daily_count()
         if auto_speak:
-            speak_word(eng)
+            speak_word(eng, restart=True)
         self.update()
 
     def next_word(self, force=False, count_progress=True):
         if handmode and not force:
             return
         eng, chn = self._next_word_item()
-        self._apply_word(eng, chn, count_progress=count_progress)
+        self._apply_word(eng, chn, count_progress=count_progress, track_history=True)
 
     def _manual_next_word(self, count_progress=True):
         eng, chn = self._next_word_item()
-        self._apply_word(eng, chn, count_progress=count_progress)
+        self._apply_word(eng, chn, count_progress=count_progress, track_history=True)
+
+    def _show_previous_word(self):
+        if self._history_pos <= 0:
+            self._show_popup("提示", "已经是最早的词了")
+            return
+        self._history_pos -= 1
+        eng, chn = self._history[self._history_pos]
+        self._apply_word(eng, chn, count_progress=False, track_history=False)
+
+    def _show_next_word(self, count_progress=True):
+        # If user is browsing history, move forward inside history first.
+        if self._history_pos < len(self._history) - 1:
+            self._history_pos += 1
+            eng, chn = self._history[self._history_pos]
+            self._apply_word(eng, chn, count_progress=count_progress, track_history=False)
+            return
+        self._manual_next_word(count_progress=count_progress)
 
     def _speak_current_word(self):
         text = self.eng_label.text().strip()
         if not text:
             return
-        speak_word(text)
+        speak_word(text, restart=True)
 
     def _show_popup(self, title: str, content: str):
         popup = CatPopup(self, title, content)
@@ -1293,21 +1555,45 @@ class WordWindow(QWidget):
     def _on_auto_change(self):
         self.next_word()
 
-    def _toggle_order(self):
+    def _set_order_mode(self, sequential: bool):
         global order
-        order = (order + 1) % 2
+        order = 1 if sequential else 0
         self._show_popup("播放顺序", "顺序播放" if order == 1 else "随机播放")
 
-    def _toggle_mode(self):
+    def _set_play_mode(self, manual: bool):
         global handmode
-        handmode = (handmode + 1) % 2
-        msg = "手动切换: 双击或空格换词" if handmode == 1 else "自动切换已开启"
+        handmode = 1 if manual else 0
+        msg = "手动切换：双击、空格或右键下一词" if handmode == 1 else "自动切换已开启"
         self._show_popup("播放模式", msg)
 
     def _toggle_auto_speak(self, checked: bool):
         set_tts_enabled(bool(checked))
         if checked:
             self._speak_current_word()
+
+    def _set_tts_language(self, lang: str):
+        ok = set_tts_language(lang)
+        if lang == "ja":
+            if ok:
+                self._show_popup("朗读语言", "已切换为日语朗读")
+            elif "ja" not in _tts_voice_missing_warned:
+                _tts_voice_missing_warned.add("ja")
+                self._show_popup("朗读语言", "未检测到日语语音包，已切回英语朗读")
+        else:
+            self._show_popup("朗读语言", "已切换为英语朗读")
+
+    def _apply_detected_tts_language(self, show_popup: bool = False):
+        lang = detected_lexicon_lang if detected_lexicon_lang in {"en", "ja"} else "en"
+        ok = set_tts_language(lang)
+        if not show_popup:
+            return
+        if lang == "ja":
+            if ok:
+                self._show_popup("朗读语言", "已根据词库自动切换为日语")
+            else:
+                self._show_popup("朗读语言", "词库为日语，但系统无日语语音包，已使用英语")
+        else:
+            self._show_popup("朗读语言", "已根据词库自动切换为英语")
 
     def _copy_word(self):
         text = self.eng_label.text().strip()
@@ -1317,25 +1603,25 @@ class WordWindow(QWidget):
             pyperclip.copy(text)
         else:
             QApplication.clipboard().setText(text)
-        self._show_popup("澶嶅埗瀹屾垚", f"宸插鍒? {text}")
+        self._show_popup("复制完成", f"已复制：{text}")
 
     def _favourite(self):
         try:
-            with open(_p("鏀惰棌澶?txt"), "a", encoding="utf-8") as f:
+            with open(_p("收藏夹.txt"), "a", encoding="utf-8") as f:
                 f.write(f"{self.eng_label.text()} {self.chn_label.text()}\n")
-            self._show_popup("鏀惰棌鎴愬姛", "褰撳墠鍗曡瘝宸插姞鍏ユ敹钘忓す")
+            self._show_popup("收藏成功", "当前词条已加入收藏夹")
         except OSError as exc:
-            self._show_popup("鏀惰棌澶辫触", str(exc))
+            self._show_popup("收藏失败", str(exc))
 
     def _set_speed(self):
         global waitTime
         value, ok = QInputDialog.getDouble(
-            self, "鎾斁閫熷害", "鍒囨崲鏃堕棿(绉?:", waitTime, 0.5, 30.0, 1
+            self, "播放速度", "切换时间（秒）:", waitTime, 0.5, 30.0, 1
         )
         if ok:
             waitTime = value
             self._refresh_timer()
-            self._show_popup("閫熷害鏇存柊", f"鍒囨崲闂撮殧: {waitTime:.1f}s")
+            self._show_popup("速度更新", f"切换间隔：{waitTime:.1f}s")
 
     def _set_theme_by_name(self, name: str):
         global bgcolor, fgcolor
@@ -1349,6 +1635,7 @@ class WordWindow(QWidget):
         if not self._word_color:
             self._word_color = fgcolor
         self.update()
+        self._show_popup("主题色", f"当前主题：{name}")
 
     def _set_font_by_name(self, name: str):
         global ENGfont, CHNfont
@@ -1356,46 +1643,170 @@ class WordWindow(QWidget):
             return
         ENGfont, CHNfont = fonts[name]
         self._apply_fonts()
+        self._show_popup("字体", f"当前字体：{name}")
 
     def _set_alpha_by_name(self, name: str):
         global alpha
         if name not in alphaValues:
             return
-        alpha = alphaValues[name]
+        transparency = float(alphaValues[name])
+        alpha = _transparency_to_alpha(transparency)
         self.setWindowOpacity(alpha)
+        self._show_popup("透明度", f"当前透明度：{name}")
 
-    def _set_word_color(self, color_hex: str):
+    def _open_alpha_slider(self):
+        global alpha
+        origin_alpha = alpha
+        dialog = QDialog(self)
+        dialog.setWindowTitle("透明度调节")
+        dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        dialog.setAttribute(Qt.WA_TranslucentBackground, True)
+        dialog.setModal(True)
+        dialog.resize(340, 170)
+
+        card = QWidget(dialog)
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(10)
+        title = DragHandleLabel("透明度调节（越大越透明）", target_window=dialog)
+        value_label = QLabel("")
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(int(round(_alpha_to_transparency(alpha) * 100)))
+
+        def _on_change(v: int):
+            nonlocal value_label
+            value_label.setText(f"当前透明度：{v}%")
+            alpha_now = _transparency_to_alpha(v / 100.0)
+            self.setWindowOpacity(alpha_now)
+            QApplication.processEvents()
+
+        slider.valueChanged.connect(_on_change)
+        _on_change(slider.value())
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        btn_cancel = QPushButton("取消")
+        btn_ok = QPushButton("确定")
+        actions.addWidget(btn_cancel)
+        actions.addWidget(btn_ok)
+
+        def _on_cancel():
+            self.setWindowOpacity(origin_alpha)
+            dialog.reject()
+
+        def _on_ok():
+            global alpha
+            alpha = _transparency_to_alpha(slider.value() / 100.0)
+            dialog.accept()
+            self._show_popup("透明度", f"当前透明度：{slider.value()}%")
+
+        btn_cancel.clicked.connect(_on_cancel)
+        btn_ok.clicked.connect(_on_ok)
+
+        card_layout.addWidget(title)
+        card_layout.addWidget(value_label)
+        card_layout.addWidget(slider)
+        card_layout.addLayout(actions)
+
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.addWidget(card)
+
+        dialog.setStyleSheet(
+            """
+            #card {
+                background: #FFF7EC;
+                border: 2px solid #F2C89B;
+                border-radius: 14px;
+            }
+            QLabel { color: #6A4B3A; }
+            QSlider::groove:horizontal {
+                border: 1px solid #E8C8A9;
+                height: 8px;
+                background: #FFFDF9;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #E6B082;
+                border: 1px solid #C98955;
+                width: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+            }
+            QPushButton {
+                background: #FFE7CC;
+                border: 1px solid #E6B082;
+                border-radius: 8px;
+                padding: 5px 12px;
+                color: #6A4B3A;
+            }
+            """
+        )
+        center = self.geometry().center()
+        dialog.move(center.x() - dialog.width() // 2, center.y() - dialog.height() // 2)
+        if hasattr(dialog, "exec"):
+            dialog.exec()
+        else:
+            dialog.exec_()
+
+    def _set_word_color(self, color_hex: str, persist: bool = True):
         global word_color
         self._word_color = color_hex
-        word_color = self._word_color
+        if persist:
+            word_color = self._word_color
         self._apply_fonts()
+        if not persist:
+            QApplication.processEvents()
 
-    def _set_counter_color(self, color_hex: str):
+    def _set_counter_color(self, color_hex: str, persist: bool = True):
         global counter_color
         self._counter_color = color_hex
-        counter_color = self._counter_color
+        if persist:
+            counter_color = self._counter_color
         self._refresh_daily_count_label()
         self.update()
+        if not persist:
+            QApplication.processEvents()
 
-    def _pick_color_styled(self, current: QColor, title: str):
+    def _pick_color_styled(self, current: QColor, title: str, on_change=None):
         source_pixmaps = [p for p in self._cat_pixmaps if p is not None and not p.isNull()]
         if not source_pixmaps and self.cat_corner.pixmap() is not None:
             source_pixmaps = [self.cat_corner.pixmap()]
-        return CuteColorDialog.get_color(self, title, current.name(), cat_pixmaps=source_pixmaps)
+        return CuteColorDialog.get_color(
+            self,
+            title,
+            current.name(),
+            cat_pixmaps=source_pixmaps,
+            on_change=on_change,
+        )
 
     def _pick_word_color_palette(self):
-        current = QColor(self._word_color or fgcolor)
-        chosen = self._pick_color_styled(current, "单词颜色")
+        origin = self._word_color or fgcolor
+        current = QColor(origin)
+        chosen = self._pick_color_styled(
+            current,
+            "单词颜色",
+            on_change=lambda c: self._set_word_color(c.name(), persist=False),
+        )
         if chosen is None:
+            self._set_word_color(origin, persist=False)
             return
-        self._set_word_color(chosen.name())
+        self._set_word_color(chosen.name(), persist=True)
 
     def _pick_counter_color_palette(self):
-        current = QColor(self._counter_color or "#F7F0E8")
-        chosen = self._pick_color_styled(current, "数字颜色")
+        origin = self._counter_color or "#F7F0E8"
+        current = QColor(origin)
+        chosen = self._pick_color_styled(
+            current,
+            "数字颜色",
+            on_change=lambda c: self._set_counter_color(c.name(), persist=False),
+        )
         if chosen is None:
+            self._set_counter_color(origin, persist=False)
             return
-        self._set_counter_color(chosen.name())
+        self._set_counter_color(chosen.name(), persist=True)
 
     def _set_lexicon(self, selected_name: str):
         global file, default_lexicon
@@ -1404,6 +1815,9 @@ class WordWindow(QWidget):
         file = lexicon[selected_name]
         default_lexicon = selected_name
         getWord()
+        self._apply_detected_tts_language(show_popup=True)
+        self._history = []
+        self._history_pos = -1
         self._manual_next_word(count_progress=False)
         geom = self.geometry()
         geometry_str = f"{geom.width()}x{geom.height()}+{geom.x()}+{geom.y()}"
@@ -1451,8 +1865,11 @@ class WordWindow(QWidget):
             action = parent_menu.addAction("未找到词库")
             action.setEnabled(False)
             return
+        current = self._current_lexicon_name()
         for name in lexicon.keys():
             action = parent_menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == current)
             action.triggered.connect(lambda checked=False, n=name: self._set_lexicon(n))
 
     def _show_context_menu(self, pos):
@@ -1483,53 +1900,70 @@ class WordWindow(QWidget):
             """
         )
 
-        menu.addAction("切换模式", self._toggle_mode)
-        menu.addAction("切换顺序", self._toggle_order)
-        menu.addAction("播放速度", self._set_speed)
+        # Section 1: frequently used actions (top)
         menu.addAction("朗读当前词", self._speak_current_word)
-
         auto_action = QAction("自动朗读", self, checkable=True)
         auto_action.setChecked(bool(auto_speak))
         auto_action.toggled.connect(self._toggle_auto_speak)
         menu.addAction(auto_action)
-        menu.addAction("清零今日计数", self._reset_daily_count)
-
-        menu.addSeparator()
+        menu.addAction("播放速度", self._set_speed)
         menu.addAction("复制该词", self._copy_word)
         menu.addAction("收藏该词", self._favourite)
+        menu.addAction("清零今日计数", self._reset_daily_count)
 
+        # Section 2: arrow sub-menus grouped in the middle
         menu.addSeparator()
+        mode_menu = menu.addMenu("播放模式")
+        mode_manual = mode_menu.addAction("手动")
+        mode_manual.setCheckable(True)
+        mode_manual.setChecked(handmode == 1)
+        mode_manual.triggered.connect(lambda checked=False: self._set_play_mode(True))
+        mode_auto = mode_menu.addAction("自动")
+        mode_auto.setCheckable(True)
+        mode_auto.setChecked(handmode == 0)
+        mode_auto.triggered.connect(lambda checked=False: self._set_play_mode(False))
+
+        order_menu = menu.addMenu("播放顺序")
+        order_seq = order_menu.addAction("顺序")
+        order_seq.setCheckable(True)
+        order_seq.setChecked(order == 1)
+        order_seq.triggered.connect(lambda checked=False: self._set_order_mode(True))
+        order_rand = order_menu.addAction("随机")
+        order_rand.setCheckable(True)
+        order_rand.setChecked(order == 0)
+        order_rand.triggered.connect(lambda checked=False: self._set_order_mode(False))
+
         word_color_menu = menu.addMenu("单词颜色")
         word_color_menu.addAction("打开调色板", self._pick_word_color_palette)
         counter_color_menu = menu.addMenu("数字颜色")
         counter_color_menu.addAction("打开调色板", self._pick_counter_color_palette)
         theme_menu = menu.addMenu("主题色")
+        current_theme = self._current_theme_name()
         for theme_name in themeColors.keys():
             action = theme_menu.addAction(theme_name)
+            action.setCheckable(True)
+            action.setChecked(theme_name == current_theme)
             action.triggered.connect(
                 lambda checked=False, n=theme_name: self._set_theme_by_name(n)
             )
 
         font_menu = menu.addMenu("字体")
+        current_font = self._current_font_name()
         for font_name in fonts.keys():
             action = font_menu.addAction(font_name)
+            action.setCheckable(True)
+            action.setChecked(font_name == current_font)
             action.triggered.connect(
                 lambda checked=False, n=font_name: self._set_font_by_name(n)
             )
 
-        alpha_menu = menu.addMenu("透明度")
-        for alpha_name in alphaValues.keys():
-            action = alpha_menu.addAction(alpha_name)
-            action.triggered.connect(
-                lambda checked=False, n=alpha_name: self._set_alpha_by_name(n)
-            )
-        menu.addAction("全屏模式", self._toggle_fullscreen)
-
-        menu.addSeparator()
+        menu.addAction("透明度调节", self._open_alpha_slider)
         lexicon_menu = menu.addMenu("切换词库")
         self._rebuild_lexicon_menu(lexicon_menu)
 
+        # Section 3: persistence & app control (bottom)
         menu.addSeparator()
+        menu.addAction("全屏模式", self._toggle_fullscreen)
         menu.addAction("保存配置", self._save_pref)
         menu.addAction("恢复配置", self._restore_pref)
         menu.addAction("退出", self._request_quit)
@@ -1594,7 +2028,7 @@ class WordWindow(QWidget):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._manual_next_word()
+            self._show_next_word(count_progress=True)
             event.accept()
         else:
             super().mouseDoubleClickEvent(event)
@@ -1628,8 +2062,16 @@ class WordWindow(QWidget):
         self._refresh_daily_count_label()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Space:
-            self._manual_next_word()
+        if event.key() in {Qt.Key_Space, Qt.Key_Right}:
+            self._show_next_word(count_progress=True)
+            event.accept()
+            return
+        if event.key() == Qt.Key_Left:
+            self._show_previous_word()
+            event.accept()
+            return
+        if event.key() == Qt.Key_R:
+            self._speak_current_word()
             event.accept()
             return
         super().keyPressEvent(event)
