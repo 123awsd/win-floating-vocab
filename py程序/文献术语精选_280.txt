@@ -1,0 +1,160 @@
+NAVIGATION	导航
+pipeline	处理流程；方法链路
+control	控制；控制策略
+ABSTRACT	摘要
+policy	策略函数
+robot	机器人
+planning	规划；路径规划
+reasoning	推理
+map	平均精度均值
+trajectory	轨迹
+ablation	消融实验
+VLN	视觉语言导航（Vision-Language Navigation）
+experiments	实验
+approach	方法框架
+quadrotor	四旋翼
+perception	感知
+VLM	视觉语言模型（Vision-Language Model）
+INTRODUCTION	引言
+Zero-Shot	零样本
+UAV	无人机（Unmanned Aerial Vehicle）
+RL	强化学习（Reinforcement Learning）
+tracking	跟踪；追踪
+controller	控制器
+Success Rate	成功率
+Multi-Robot	多机器人系统
+Reinforcement Learning	强化学习
+generalization	泛化能力
+MULTI-AGENT	多智能体
+baseline	基线
+robustness	鲁棒性
+module	功能模块
+dataset	数据集
+Navigation VLN	导航视觉语言导航
+Sim to Real	仿真到现实迁移
+Differentiable Simulation	可微分仿真
+Object Goal Navigation	目标物体导航
+real time	实时性
+evaluation	评估
+End-to-End	端到端
+MLLM	多模态大语言模型（Multimodal Large Language Model）
+VISION-LANGUAGE NAVIGATION	视觉语言导航
+Semantic Navigation	语义导航
+SPL	路径效率加权成功率（Success weighted by Path Length）
+Robot navigation	机器人导航
+Planning and Control	规划与控制
+Navigation system	导航系统
+Aerial Vehicles	空中飞行器
+Goal Navigation	目标导航
+Obstacle Avoidance	避障
+inference	推理阶段
+Object Navigation	目标物体导航
+latency	时延
+Model VLM	模型视觉语言模型
+Open-Vocabulary	开放词汇
+planner	规划器
+floor plan	楼层平面图
+Quantitative Results	定量结果
+Chain-of-Thought	思维链推理
+Quadrotor Control	四旋翼控制
+point cloud	点云
+Optical Flow	光流
+fusion	特征融合
+perception pipeline	感知流程
+supplementary	补充材料
+Semantic Map	语义地图
+World Model	世界模型
+Aerial Robots	空中机器人
+Agile Flight	敏捷飞行
+Scene Graph	场景图
+High-Speed Flight	高速飞行
+Learning Quadrotor Control	学习四旋翼控制
+sample efficiency	样本效率
+dynamics model	动力学模型
+flight trajectory	飞行轨迹
+VLA	视觉语言动作模型（Vision-Language-Action）
+waypoint	航路点
+Trajectory Planning	轨迹规划
+semantic reasoning	语义推理
+VLM Reasoning	视觉语言模型推理
+swarm	集群
+Aerial Vision-Language	空中视觉语言
+Aerial Transportation	空中运输
+Embodied AI	具身智能
+Robot Exploration	机器人探索
+sampling	采样
+aerial robot	空中机器人
+Proactive Perception	前瞻式感知
+Spatiotemporal Context	时空上下文
+UAV Navigation	无人机导航
+model-free	无模型方法
+Language Model VLM	语言模型视觉语言模型
+UAV VLN	无人机视觉语言导航
+Visual Tracking	视觉跟踪
+policy learning	策略学习
+Aerial Navigation	空中导航
+RL controller	强化学习控制器
+Focused Reasoning	聚焦推理
+network policy	网络策略
+replanning	重规划
+robots and semantic	机器人与语义
+navigation task	导航任务
+encoder	编码器
+control policy	控制策略
+Score Collaboration	评分协作机制
+model-based	基于模型方法
+fine-tuning	微调
+precision	精确率
+system and policy	系统与策略
+multi-robot navigation	多机器人导航
+shot perception	样本感知
+shot perception pipeline	样本感知流程
+perception and planning	感知与规划
+navigation policy	导航策略
+trajectory tracking	轨迹跟踪
+learning with policy	基于策略的学习
+real-world robotics	真实世界机器人
+trajectory and point	轨迹与点
+rate and navigation	率与导航
+RMSE	均方根误差（Root Mean Square Error）
+decoder	解码器
+imitation learning	模仿学习
+multirotor	多旋翼飞行器
+limitation	局限性
+trajectory optimization	轨迹优化
+transformer	变换器架构
+projection	特征投影
+appendix	附录
+future work	未来工作
+tracking error	跟踪误差
+open-loop	开环控制
+related work	相关工作
+Learning Policy	学习策略
+control	控制
+Qualitative Results	定性结果
+robotics RL	机器人强化学习
+Multi-Robot Semantic	多机器人语义
+shot semantic	样本语义
+Cable-Suspended Load	缆索悬挂负载
+Aerial Robotics	空中机器人
+backbone	主干网络
+Aerial Manipulation	空中操作
+Multi-Robot Exploration	多机器人探索
+formation	编队
+Vehicle UAV	飞行器无人机
+control The learning	控制学习
+control quadrotor	控制四旋翼
+RL to control	强化学习控制
+high-speed navigation	高速度导航
+Aerial Vehicle	空中飞行器
+VLN dataset	视觉语言导航数据集
+Navigation Object-Goal	导航目标物体目标
+Robot Control	机器人控制
+Learning for Robot	学习机器人
+closed-loop	闭环控制
+VLN agent	视觉语言导航智能体
+distributed control	分布式控制
+alignment	对齐
+depth map	深度图
+flight time	续航时间
+occupancy map	占据栅格图

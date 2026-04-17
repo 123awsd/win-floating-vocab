@@ -1,0 +1,61 @@
+﻿# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# =========================
+# Python cache / env
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+env/
+
+# =========================
+# Build / packaging artifacts
+# =========================
+build/
+dist/
+*.egg-info/
+*.spec.bak
+
+# PyInstaller temporary output
+发布包/build_temp/
+
+# =========================
+# Runtime / local machine files
+# =========================
+**/daily_progress.json
+**/preference.ini
+**/startup_error.log
+*.log
+
+# =========================
+# Temp / scratch files
+# =========================
+**/*_tmp*
+*_tmp*
+
+# =========================
+# Local-only folders (do not upload)
+# =========================
+发布包/
+词表生成/
+运营计划/
+未处理的素材/
+
+# Legacy local folders
+准备上传_GitHub/
+不上传_GitHub/
+
+# =========================
+# Optional: archives generated during release
+# =========================
+*.zip
