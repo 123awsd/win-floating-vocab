@@ -192,7 +192,6 @@ isFullScreen = 0
 auto_speak = 0
 order = 0
 handmode = 1
-tts_language = "en"
 
 ui_theme = "cattoon_v1"
 window_radius = 22
@@ -232,7 +231,6 @@ lexicon = {}
 words = {}
 word_items = []
 word_index = 0
-detected_lexicon_lang = "en"
 
 _tts_worker_started = False
 _tts_lock = threading.Lock()
@@ -240,8 +238,6 @@ _tts_error_hint_shown = False
 _tts_latest_text = ""
 _tts_request_event = threading.Event()
 _tts_current_proc = None
-_tts_voice_missing_warned = set()
-
 _ENG_TTS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\s\-\+'/]*$")
 _HAS_LETTER_PATTERN = re.compile(r"[A-Za-z]")
 DAILY_PROGRESS_FILE = BASE_DIR / "daily_progress.json"
@@ -327,8 +323,6 @@ def _can_speak_text(text: str) -> bool:
     text = (text or "").strip()
     if not text:
         return False
-    if tts_language == "ja":
-        return True
     return _is_english_word(text)
 
 
@@ -440,13 +434,11 @@ def _build_tts_script():
     return (
         "$ErrorActionPreference='Stop';"
         "$text=$env:W2R_TTS_TEXT;"
-        "$lang=$env:W2R_TTS_LANG;"
         "if($text -cmatch '^[A-Z]{2,6}$'){ $text = (($text.ToCharArray()) -join ' ') };"
         "$v=New-Object -ComObject SAPI.SpVoice;"
         "$voices=$v.GetVoices();"
         "$pattern='English|en-US|en-GB';"
         "$langHex='409';"
-        "if($lang -eq 'ja'){ $pattern='Japanese|ja-JP|日本|日语'; $langHex='411' };"
         "$matched=$false;"
         "for($i=0;$i -lt $voices.Count;$i++){"
         "  $vi=$voices.Item($i);"
@@ -466,7 +458,6 @@ def _spawn_sapi_speak(text):
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     env = os.environ.copy()
     env["W2R_TTS_TEXT"] = text
-    env["W2R_TTS_LANG"] = tts_language
     return subprocess.Popen(
         [
             "powershell.exe",
@@ -482,36 +473,6 @@ def _spawn_sapi_speak(text):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-
-
-def _has_voice_for_language(lang: str) -> bool:
-    if lang != "ja":
-        return True
-    script = (
-        "$v=New-Object -ComObject SAPI.SpVoice;"
-        "$voices=$v.GetVoices();"
-        "$ok=$false;"
-        "for($i=0;$i -lt $voices.Count;$i++){"
-        "  $vi=$voices.Item($i);"
-        "  $d=$vi.GetDescription();"
-        "  $langAttr='';"
-        "  try{ $langAttr=$vi.GetAttribute('Language') }catch{};"
-        "  if($d -match 'Japanese|ja-JP|日本|日语' -or $langAttr -match '411'){ $ok=$true; break }"
-        "};"
-        "if($ok){'1'}else{'0'};"
-    )
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        out = subprocess.check_output(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-            creationflags=creationflags,
-            stderr=subprocess.DEVNULL,
-            timeout=2.5,
-            text=True,
-        )
-        return out.strip().endswith("1")
-    except Exception:
-        return False
 
 
 def _stop_current_tts():
@@ -601,18 +562,6 @@ def set_tts_enabled(flag: bool) -> None:
         _stop_current_tts()
 
 
-def set_tts_language(lang: str) -> bool:
-    global tts_language
-    lang = (lang or "").strip().lower()
-    if lang not in {"en", "ja"}:
-        return False
-    if lang == "ja" and not _has_voice_for_language("ja"):
-        tts_language = "en"
-        return False
-    tts_language = lang
-    return True
-
-
 def loadLexiconByDir():
     lexicon.clear()
     ignore_stems = {"requirements", "使用说明", "startup_error"}
@@ -656,7 +605,7 @@ def _load_theme_file(path: str, target: dict):
 def readConfig():
     global auto_speak, waitTime, order, ENGfont, CHNfont, bgcolor, fgcolor, alpha
     global word_color, counter_color
-    global ui_theme, window_radius, font_scale, default_lexicon, file, tts_language
+    global ui_theme, window_radius, font_scale, default_lexicon, file
     global themeColors, fonts, alphaValues
     if not isinstance(themeColors, dict):
         themeColors = dict(DEFAULT_THEME_COLORS)
@@ -696,9 +645,6 @@ def readConfig():
         default_lexicon = extra_pairs.get("default_lexicon", default_lexicon).strip()
         word_color = extra_pairs.get("word_color", word_color or fgcolor).strip() or fgcolor
         counter_color = extra_pairs.get("counter_color", counter_color).strip() or "#F7F0E8"
-        tts_language = extra_pairs.get("tts_language", tts_language).strip().lower() or "en"
-        if tts_language not in {"en", "ja"}:
-            tts_language = "en"
         # v2: user-facing "transparency" value, where larger means more transparent.
         transparency_text = extra_pairs.get("transparency", "")
         if transparency_text:
@@ -747,7 +693,6 @@ def saveConfig(geometry_str: str, fs: int):
         f.write(f"default_lexicon={default_lexicon}\n")
         f.write(f"word_color={word_color}\n")
         f.write(f"counter_color={counter_color}\n")
-        f.write(f"tts_language={tts_language}\n")
         f.write(f"transparency={_alpha_to_transparency(alpha):.2f}\n")
 
 
@@ -778,26 +723,8 @@ def _parse_words_from_file(file_path: str):
     return loaded
 
 
-def _detect_language_from_terms(term_map: dict) -> str:
-    if not term_map:
-        return "en"
-    ja_hits = 0
-    en_hits = 0
-    ja_re = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\u4e00-\u9fff]")
-    en_re = re.compile(r"[A-Za-z]")
-    for idx, term in enumerate(term_map.keys()):
-        if idx >= 120:
-            break
-        text = str(term)
-        if ja_re.search(text):
-            ja_hits += 1
-        if en_re.search(text):
-            en_hits += 1
-    return "ja" if ja_hits > en_hits and ja_hits > 0 else "en"
-
-
 def getWord():
-    global file, words, word_items, word_index, default_lexicon, detected_lexicon_lang
+    global file, words, word_items, word_index, default_lexicon
 
     def _safe_exists(path_text: str) -> bool:
         try:
@@ -845,7 +772,6 @@ def getWord():
     default_lexicon = Path(file).stem
     word_items = list(words.items())
     word_index = 0
-    detected_lexicon_lang = _detect_language_from_terms(words)
     _log(f"getWord: final count={len(word_items)}")
 
 
@@ -1235,7 +1161,6 @@ class WordWindow(QWidget):
 
         self._apply_saved_geometry()
         self.next_word(force=True, count_progress=False)
-        self._apply_detected_tts_language(show_popup=False)
 
     def _current_lexicon_name(self) -> str:
         try:
@@ -1571,30 +1496,6 @@ class WordWindow(QWidget):
         if checked:
             self._speak_current_word()
 
-    def _set_tts_language(self, lang: str):
-        ok = set_tts_language(lang)
-        if lang == "ja":
-            if ok:
-                self._show_popup("朗读语言", "已切换为日语朗读")
-            elif "ja" not in _tts_voice_missing_warned:
-                _tts_voice_missing_warned.add("ja")
-                self._show_popup("朗读语言", "未检测到日语语音包，已切回英语朗读")
-        else:
-            self._show_popup("朗读语言", "已切换为英语朗读")
-
-    def _apply_detected_tts_language(self, show_popup: bool = False):
-        lang = detected_lexicon_lang if detected_lexicon_lang in {"en", "ja"} else "en"
-        ok = set_tts_language(lang)
-        if not show_popup:
-            return
-        if lang == "ja":
-            if ok:
-                self._show_popup("朗读语言", "已根据词库自动切换为日语")
-            else:
-                self._show_popup("朗读语言", "词库为日语，但系统无日语语音包，已使用英语")
-        else:
-            self._show_popup("朗读语言", "已根据词库自动切换为英语")
-
     def _copy_word(self):
         text = self.eng_label.text().strip()
         if not text:
@@ -1815,7 +1716,6 @@ class WordWindow(QWidget):
         file = lexicon[selected_name]
         default_lexicon = selected_name
         getWord()
-        self._apply_detected_tts_language(show_popup=True)
         self._history = []
         self._history_pos = -1
         self._manual_next_word(count_progress=False)

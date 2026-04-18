@@ -2,11 +2,11 @@
 
 [中文说明](README.md) | English
 
-A lightweight Windows desktop overlay app for vocabulary learning, with custom lexicons, auto/manual playback, and English/Japanese TTS support.
+A lightweight Windows desktop overlay app for vocabulary learning, with custom lexicons, auto/manual playback, and English TTS support.
 
 ## Highlights
 - Floating vocabulary window that stays out of your way
-- Lexicon switching with automatic EN/JA language detection
+- Fast lexicon switching for custom vocabulary sets
 - Quick controls via mouse, keyboard, and context menu
 - Customizable UI: theme, fonts, word/counter colors, opacity slider
 - Daily progress counter and favorites support
@@ -51,23 +51,8 @@ reinforcement learning	强化学习（RL）
 policy optimization	策略优化
 ```
 
-## Japanese TTS (Voice Pack)
-The app auto-detects lexicon language. If your lexicon is Japanese but no Japanese voice is installed, it falls back to English voice.
-
-### Install Japanese Speech Pack (Windows 11)
-1. Open `Settings -> Time & language -> Language & region`
-2. Add `Japanese`
-3. Open `Japanese -> Language options`
-4. Install `Speech`
-5. Restart Windows and run the app again
-
-### Install Japanese Speech Pack (Windows 10)
-1. Open `Settings -> Time & Language -> Language`
-2. Add `Japanese`
-3. Open language options and install `Speech`
-4. Restart Windows and run the app again
-
-Note: Japanese voice packs are system-level Windows components and cannot be reliably bundled inside this repository.
+## TTS Notes
+This version supports English TTS only. For best results, keep the left side of each lexicon entry in English.
 
 ## Packaging (Optional)
 Run from project root:
