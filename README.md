@@ -6,7 +6,7 @@
 ## 1. 先准备环境（只做一次）
 
 ```powershell
-cd py程序
+cd catword
 python -m pip install -r requirements.txt
 ```
 
@@ -59,15 +59,15 @@ policy optimization	策略优化
 
 ### 放到哪里
 
-把你的词表 `.txt` 放到 `py程序/` 目录里。  
+把你的词表 `.txt` 放到 `catword/` 目录里。  
 然后在程序里右键 `切换词库` 选择对应文件。
 
 ## 6. 自带示例词表
 
 位置：
 
-- `py程序/高考3500词汇表_乱序.txt`
-- `py程序/文献术语精选_280_乱序.txt`
+- `catword/高考3500词汇表_乱序.txt`
+- `catword/文献术语精选_280_乱序.txt`
 
 你可以直接切换到这些词表体验。
 
@@ -100,3 +100,4 @@ pyinstaller --noconfirm --clean W2R_Cattoon_PySide6.spec
 ---
 
 如果这个项目对你有帮助，欢迎 Star。
+

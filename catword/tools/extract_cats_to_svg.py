@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import base64
 import io
 from pathlib import Path
@@ -173,10 +173,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Extract single cats from montage images with broken-outline fix."
     )
-    parser.add_argument("--input-dir", default="未处理的素材", help="Source image directory")
+    parser.add_argument("--input-dir", default="鏈鐞嗙殑绱犳潗", help="Source image directory")
     parser.add_argument(
         "--output-dir",
-        default="py程序/assets/cattoon_v1/cats",
+        default="py绋嬪簭/assets/cattoon_v1/cats",
         help="Output directory for cat assets",
     )
     args = parser.parse_args()
@@ -207,3 +207,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
