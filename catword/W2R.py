@@ -1,4 +1,5 @@
-﻿import os
+﻿import ctypes.util
+import os
 import json
 import random
 import re
@@ -22,7 +23,19 @@ QT_BACKEND = "PySide6"
 _pyside6_import_error = None
 try:
     from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
-    from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap
+    from PySide6.QtGui import (
+        QAction,
+        QColor,
+        QCursor,
+        QFont,
+        QFontDatabase,
+        QFontMetrics,
+        QIcon,
+        QPainter,
+        QPainterPath,
+        QPen,
+        QPixmap,
+    )
     from PySide6.QtWidgets import (
         QApplication,
         QDialog,
@@ -46,7 +59,18 @@ except ImportError as _exc_pyside6:
     QT_BACKEND = "PyQt5"
     try:
         from PyQt5.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
-        from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap
+        from PyQt5.QtGui import (
+            QColor,
+            QCursor,
+            QFont,
+            QFontDatabase,
+            QFontMetrics,
+            QIcon,
+            QPainter,
+            QPainterPath,
+            QPen,
+            QPixmap,
+        )
         from PyQt5.QtWidgets import (
             QAction,
             QApplication,
@@ -91,15 +115,56 @@ else:
 LOG_FILE = BASE_DIR / "startup_error.log"
 ASSET_DIR = BASE_DIR / "assets" / "cattoon_v1"
 CAT_DIR = ASSET_DIR / "cats"
-APP_ICON_REL = Path("assets") / "app_icon" / "app.ico"
-MIN_WINDOW_HEIGHT = 36
-MAX_WINDOW_HEIGHT = 180
+APP_ICON_RELS = (
+    Path("assets") / "app_icon" / "app.png",
+    Path("assets") / "app_icon" / "app.ico",
+)
+DEFAULT_LEXICON_FILE = "word_list.txt"
+FAVORITES_FILE = "favorites.txt"
+MIN_WINDOW_HEIGHT = 72
+MAX_WINDOW_HEIGHT = 360
 MIN_WINDOW_WIDTH = 180
 MAX_WINDOW_WIDTH = 960
 
 
 def _p(name: str) -> str:
     return str(BASE_DIR / name)
+
+
+def _is_windows() -> bool:
+    return sys.platform.startswith("win")
+
+
+def _is_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def _has_shared_library(*names: str) -> bool:
+    for name in names:
+        if name and ctypes.util.find_library(name):
+            return True
+    return False
+
+
+def _detect_missing_linux_runtime_packages() -> list[str]:
+    if not _is_linux():
+        return []
+    qt_platform = (os.environ.get("QT_QPA_PLATFORM") or "").strip().lower()
+    if qt_platform and qt_platform not in {"xcb", "wayland", "wayland-egl"}:
+        return []
+    use_xcb = qt_platform in {"", "xcb"} and bool(os.environ.get("DISPLAY"))
+    if not use_xcb:
+        return []
+    missing = []
+    if not _has_shared_library("xcb-cursor", "xcb_cursor"):
+        missing.append("libxcb-cursor0")
+    if not _has_shared_library("xkbcommon-x11"):
+        missing.append("libxkbcommon-x11-0")
+    return missing
 
 
 def _log(message: str):
@@ -124,13 +189,13 @@ def _parse_bool(text: str, default: bool = False) -> bool:
 
 waitTime = 2.0
 default_lexicon = ""
-file = _p("鍗曡瘝琛?txt")
+file = _p(DEFAULT_LEXICON_FILE)
 bgcolor = "#FFEFD6"
 fgcolor = "#4D3B36"
 word_color = fgcolor
 counter_color = "#F7F0E8"
 ENGfont = "Consolas"
-CHNfont = "瀹嬩綋"
+CHNfont = "Sans Serif"
 alpha = 0.96
 isFullScreen = 0
 auto_speak = 0
@@ -149,6 +214,8 @@ themeColors = {
 DEFAULT_THEME_COLORS = dict(themeColors)
 
 fonts = {
+    "通用": ["Monospace", "Sans Serif"],
+    "Ubuntu": ["DejaVu Sans Mono", "Noto Sans CJK SC"],
     "宋体": ["Consolas", "宋体"],
     "微软雅黑": ["Consolas", "微软雅黑"],
     "苹方": ["Consolas", "苹方 常规"],
@@ -170,7 +237,7 @@ alphaValues = {
 DEFAULT_ALPHA_VALUES = dict(alphaValues)
 
 lexicon = {}
-words = {}
+words = []
 word_items = []
 word_index = 0
 
@@ -180,12 +247,14 @@ _tts_error_hint_shown = False
 _tts_latest_text = ""
 _tts_request_event = threading.Event()
 _tts_current_proc = None
+_tts_current_backend = None
 
 _ENG_TTS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\s\-\+'/]*$")
 _HAS_LETTER_PATTERN = re.compile(r"[A-Za-z]")
 DAILY_PROGRESS_FILE = BASE_DIR / "daily_progress.json"
 daily_progress_date = ""
 daily_progress_count = 0
+EMPTY_DETAIL_VALUES = {"", "-", "—", "–", "None", "none", "null", "NULL", "N/A", "n/a"}
 
 
 def _bundled_roots():
@@ -231,10 +300,12 @@ def bootstrap_runtime_files():
                 except OSError:
                     pass
                 break
-    dst_icon = BASE_DIR / APP_ICON_REL
-    if not dst_icon.exists():
+    for rel_path in APP_ICON_RELS:
+        dst_icon = BASE_DIR / rel_path
+        if dst_icon.exists():
+            continue
         for root in _bundled_roots():
-            src_icon = root / APP_ICON_REL
+            src_icon = root / rel_path
             if src_icon.exists():
                 try:
                     dst_icon.parent.mkdir(parents=True, exist_ok=True)
@@ -245,9 +316,10 @@ def bootstrap_runtime_files():
 
 
 def resolve_app_icon_path() -> Path | None:
-    candidates = [BASE_DIR / APP_ICON_REL]
+    candidates = [BASE_DIR / rel_path for rel_path in APP_ICON_RELS]
     for root in _bundled_roots():
-        candidates.append(root / APP_ICON_REL)
+        for rel_path in APP_ICON_RELS:
+            candidates.append(root / rel_path)
     for p in candidates:
         if p.exists():
             return p
@@ -323,6 +395,63 @@ def get_daily_progress_count() -> int:
     return int(daily_progress_count)
 
 
+def _font_database_families() -> set[str]:
+    try:
+        return set(QFontDatabase.families())
+    except TypeError:
+        return set(QFontDatabase().families())
+
+
+def _first_installed_font(candidates, fallback: str | None = None) -> str:
+    families = _font_database_families()
+    for name in candidates:
+        if name in families:
+            return name
+    return fallback or QFont().defaultFamily()
+
+
+def _default_mono_font_family() -> str:
+    return _first_installed_font(
+        [
+            "Consolas",
+            "JetBrains Mono",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "Noto Sans Mono CJK SC",
+            "Monospace",
+        ]
+    )
+
+
+def _default_cjk_font_family() -> str:
+    return _first_installed_font(
+        [
+            "Microsoft YaHei UI",
+            "Microsoft YaHei",
+            "微软雅黑",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "Source Han Sans SC",
+            "WenQuanYi Zen Hei",
+            "DejaVu Sans",
+            "Sans Serif",
+        ]
+    )
+
+
+def normalize_runtime_fonts() -> None:
+    global ENGfont, CHNfont
+    families = _font_database_families()
+    mono = _default_mono_font_family()
+    sans = _default_cjk_font_family()
+    if ENGfont not in families:
+        ENGfont = mono
+    if CHNfont not in families:
+        CHNfont = sans
+    fonts["通用"] = [mono, sans]
+    fonts["Ubuntu"] = [mono, sans]
+
+
 def _build_tts_script():
     return (
         "$ErrorActionPreference='Stop';"
@@ -340,12 +469,21 @@ def _build_tts_script():
     )
 
 
-def _spawn_sapi_speak(text):
+def _tts_backend_hint() -> str:
+    if _is_linux():
+        return "Linux/Ubuntu 请安装 speech-dispatcher（spd-say）或 espeak-ng。"
+    if _is_windows():
+        return "Windows 需要 PowerShell 和系统语音组件。"
+    if _is_macos():
+        return "macOS 需要系统自带的 say 命令。"
+    return "当前平台没有可用的朗读后端。"
+
+
+def _build_windows_tts_command(text: str):
     script = _build_tts_script()
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     env = os.environ.copy()
     env["W2R_TTS_TEXT"] = text
-    return subprocess.Popen(
+    return (
         [
             "powershell.exe",
             "-NoProfile",
@@ -355,18 +493,60 @@ def _spawn_sapi_speak(text):
             "-Command",
             script,
         ],
+        env,
+        getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "windows-sapi",
+    )
+
+
+def _build_tts_command(text: str):
+    if _is_windows():
+        return _build_windows_tts_command(text)
+    if _is_macos() and shutil.which("say"):
+        return (["say", text], None, 0, "macos-say")
+    if _is_linux():
+        if shutil.which("spd-say"):
+            return (["spd-say", "-w", "-r", "-20", text], None, 0, "speech-dispatcher")
+        if shutil.which("espeak-ng"):
+            return (["espeak-ng", "-s", "140", text], None, 0, "espeak-ng")
+        if shutil.which("espeak"):
+            return (["espeak", "-s", "140", text], None, 0, "espeak")
+    raise RuntimeError(_tts_backend_hint())
+
+
+def _spawn_tts_process(text: str):
+    cmd, env, creationflags, backend = _build_tts_command(text)
+    proc = subprocess.Popen(
+        cmd,
         creationflags=creationflags,
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    return proc, backend
+
+
+def _stop_backend_speech(backend: str | None) -> None:
+    if backend == "speech-dispatcher" and shutil.which("spd-say"):
+        try:
+            subprocess.run(
+                ["spd-say", "-S"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            pass
 
 
 def _stop_current_tts():
-    global _tts_current_proc
+    global _tts_current_backend, _tts_current_proc
     with _tts_lock:
         proc = _tts_current_proc
         _tts_current_proc = None
+        backend = _tts_current_backend
+        _tts_current_backend = None
+    _stop_backend_speech(backend)
     if not proc:
         return
     if proc.poll() is None:
@@ -381,7 +561,7 @@ def _stop_current_tts():
 
 
 def _tts_worker_loop():
-    global _tts_error_hint_shown, _tts_current_proc
+    global _tts_current_backend, _tts_error_hint_shown, _tts_current_proc
     while True:
         _tts_request_event.wait()
         _tts_request_event.clear()
@@ -392,15 +572,16 @@ def _tts_worker_loop():
                 break
 
             try:
-                proc = _spawn_sapi_speak(text)
+                proc, backend = _spawn_tts_process(text)
             except Exception as exc:
                 if not _tts_error_hint_shown:
                     _tts_error_hint_shown = True
-                    print(f"[TTS] 缁傝崵鍤庨張妤勵嚢娑撳秴褰查悽顭掔礉瀹歌尪鍤滈崝銊╂缁狙傝礋闂堟瑩绮妴鍌氬斧閸? {exc}")
+                    print(f"[TTS] 朗读不可用：{exc}")
                 break
 
             with _tts_lock:
                 _tts_current_proc = proc
+                _tts_current_backend = backend
 
             interrupted = False
             while proc.poll() is None:
@@ -414,6 +595,7 @@ def _tts_worker_loop():
             with _tts_lock:
                 if _tts_current_proc is proc:
                     _tts_current_proc = None
+                    _tts_current_backend = None
 
             if not interrupted:
                 break
@@ -464,7 +646,7 @@ def loadLexiconByDir():
         except OSError:
             continue
         # A lexicon line should usually contain a separator between term and meaning.
-        if "\t" not in head and " " not in head:
+        if "\t" not in head and "|" not in head and " " not in head:
             continue
         if "使用说明" in head and "双击" in head:
             continue
@@ -572,30 +754,131 @@ def saveConfig(geometry_str: str, fs: int):
         f.write(f"counter_color={counter_color}\n")
 
 
+def _clean_detail_text(text: str) -> str:
+    value = str(text or "").strip()
+    return "" if value in EMPTY_DETAIL_VALUES else value
+
+
+def _split_word_aliases(text: str) -> list[str]:
+    source = str(text or "").strip()
+    if not source:
+        return []
+    aliases = [part.strip() for part in source.split("/") if part.strip()]
+    return aliases or [source]
+
+
+def _build_word_entry(
+    word_text: str,
+    meaning_text: str,
+    pos_text: str = "",
+    example_text: str = "",
+    extra_text: str = "",
+    category_text: str = "",
+):
+    aliases = _split_word_aliases(word_text)
+    meaning = _clean_detail_text(meaning_text)
+    if not aliases or not meaning:
+        return None
+    primary = aliases[0]
+    return {
+        "word": primary,
+        "display_word": " / ".join(aliases),
+        "aliases": aliases,
+        "pos": _clean_detail_text(pos_text),
+        "meaning": meaning,
+        "example": _clean_detail_text(example_text),
+        "extra": _clean_detail_text(extra_text),
+        "category": _clean_detail_text(category_text),
+    }
+
+
+def _format_entry_meta(entry: dict) -> str:
+    parts = []
+    if entry.get("pos"):
+        parts.append(entry["pos"])
+    if entry.get("category"):
+        parts.append(entry["category"])
+    return " · ".join(parts)
+
+
+def _format_entry_detail(entry: dict) -> str:
+    lines = [entry.get("display_word") or entry.get("word") or ""]
+    if entry.get("pos"):
+        lines.append(f"词性: {entry['pos']}")
+    if entry.get("meaning"):
+        lines.append(f"词义: {entry['meaning']}")
+    if entry.get("example"):
+        lines.append(f"例句: {entry['example']}")
+    if entry.get("extra"):
+        lines.append(f"拓展: {entry['extra']}")
+    if entry.get("category"):
+        lines.append(f"分类: {entry['category']}")
+    return "\n".join(line for line in lines if line)
+
+
+def _empty_entry(word_text: str, meaning_text: str):
+    return {
+        "word": word_text,
+        "display_word": word_text,
+        "aliases": [word_text] if word_text else [],
+        "pos": "",
+        "meaning": meaning_text,
+        "example": "",
+        "extra": "",
+        "category": "",
+    }
+
+
 def _parse_words_from_file(file_path: str):
-    loaded = {}
+    loaded = []
+    current_category = ""
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            # Preferred format: term<TAB>meaning, which supports phrase terms.
-            if "\t" in line:
-                eng, chn = line.split("\t", 1)
+            if line in {"===", "+++", "---"}:
+                continue
+
+            entry = None
+
+            # my-ielts source format: word|pos|meaning|example|extra
+            if "|" in line:
+                parts = [part.strip() for part in line.split("|")]
+                entry = _build_word_entry(
+                    parts[0] if len(parts) > 0 else "",
+                    parts[2] if len(parts) > 2 else "",
+                    parts[1] if len(parts) > 1 else "",
+                    parts[3] if len(parts) > 3 else "",
+                    parts[4] if len(parts) > 4 else "",
+                    current_category,
+                )
+            elif "\t" in line:
+                # Rich TAB format:
+                # word <TAB> pos <TAB> meaning <TAB> example <TAB> extra <TAB> category
+                parts = [part.strip() for part in line.split("\t")]
+                if len(parts) >= 3:
+                    entry = _build_word_entry(
+                        parts[0],
+                        parts[2],
+                        parts[1],
+                        parts[3] if len(parts) > 3 else "",
+                        parts[4] if len(parts) > 4 else "",
+                        parts[5] if len(parts) > 5 else current_category,
+                    )
+                elif len(parts) >= 2:
+                    entry = _build_word_entry(parts[0], parts[1], category_text=current_category)
             else:
                 # Backward compatibility for legacy files: term + whitespace + meaning.
                 pre = line.split(maxsplit=1)
-                if len(pre) < 2:
+                if len(pre) >= 2:
+                    entry = _build_word_entry(pre[0], pre[1], category_text=current_category)
+                else:
+                    current_category = line
                     continue
-                eng, chn = pre[0], pre[1]
-            eng = eng.strip()
-            chn = chn.strip()
-            if not eng or not chn:
-                continue
-            if eng in loaded and loaded[eng] != chn:
-                loaded[eng] = loaded[eng].strip() + ";" + chn
-            else:
-                loaded[eng] = chn
+
+            if entry is not None:
+                loaded.append(entry)
     return loaded
 
 
@@ -611,7 +894,7 @@ def getWord():
     if not lexicon:
         loadLexiconByDir()
     if not lexicon:
-        words = {}
+        words = []
         word_items = []
         return
 
@@ -646,7 +929,7 @@ def getWord():
                 break
 
     default_lexicon = Path(file).stem
-    word_items = list(words.items())
+    word_items = list(words)
     word_index = 0
     _log(f"getWord: final count={len(word_items)}")
 
@@ -700,7 +983,7 @@ class CatPopup(QDialog):
             }
             #cat {
                 color: #D58A62;
-                font-family: Consolas;
+                font-family: monospace;
                 font-size: 13px;
             }
             """
@@ -725,6 +1008,80 @@ class CatPopup(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self.anim.start()
+
+
+class WordDetailDialog(QDialog):
+    def __init__(self, parent: QWidget, entry: dict):
+        super().__init__(parent)
+        self.setWindowTitle("词条详情")
+        self.setModal(False)
+        self.resize(520, 300)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        title = QLabel(entry.get("display_word") or entry.get("word") or "")
+        title_font = QFont(ENGfont, 18)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignTop | Qt.AlignRight)
+        form.setFormAlignment(Qt.AlignTop)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(10)
+
+        def add_row(label_text: str, value: str):
+            value = (value or "").strip()
+            if not value:
+                return
+            label = QLabel(label_text)
+            value_label = QLabel(value)
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            form.addRow(label, value_label)
+
+        add_row("词性", entry.get("pos", ""))
+        add_row("词义", entry.get("meaning", ""))
+        add_row("例句", entry.get("example", ""))
+        add_row("拓展", entry.get("extra", ""))
+        add_row("分类", entry.get("category", ""))
+        layout.addLayout(form)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        copy_btn = QPushButton("复制全部")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(_format_entry_detail(entry)))
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        actions.addWidget(copy_btn)
+        actions.addWidget(close_btn)
+        layout.addLayout(actions)
+
+        self.setStyleSheet(
+            """
+            QDialog {
+                background: #FFF7EC;
+                color: #6A4B3A;
+            }
+            QLabel {
+                color: #6A4B3A;
+            }
+            QPushButton {
+                background: #FFE7CC;
+                border: 1px solid #E6B082;
+                border-radius: 8px;
+                padding: 6px 12px;
+                color: #6A4B3A;
+            }
+            QPushButton:hover {
+                background: #FFD9B2;
+            }
+            """
+        )
 
 
 class CuteColorDialog(QDialog):
@@ -828,7 +1185,7 @@ class CuteColorDialog(QDialog):
                 border-radius: 10px;
                 color: #6A4B3A;
                 background: #FFFFFF;
-                font-family: Consolas;
+                font-family: monospace;
             }
             QSlider::groove:horizontal {
                 border: 1px solid #E8C8A9;
@@ -956,9 +1313,9 @@ class CuteColorDialog(QDialog):
 class WordWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.resize(420, 120)
-        self._base_w = 420
-        self._base_h = 120
+        self.resize(560, 220)
+        self._base_w = 560
+        self._base_h = 220
         self._scale = 1.0
         self.fs = 28
         self.word_radius = window_radius
@@ -970,6 +1327,8 @@ class WordWindow(QWidget):
         self._active_fg = fgcolor
         self._word_color = word_color or fgcolor
         self._counter_color = counter_color
+        self._current_entry = _empty_entry("", "")
+        self._detail_dialog = None
         self._fitting_fonts = False
         self._word_history = []
         self._history_index = -1
@@ -1002,11 +1361,26 @@ class WordWindow(QWidget):
         self.eng_label.setAlignment(Qt.AlignCenter)
         self.eng_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.eng_label.setMinimumSize(0, 0)
+        self.meta_label = QLabel("", self)
+        self.meta_label.setAlignment(Qt.AlignCenter)
+        self.meta_label.setWordWrap(True)
+        self.meta_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.meta_label.setMinimumSize(0, 0)
         self.chn_label = QLabel("", self)
         self.chn_label.setAlignment(Qt.AlignCenter)
         self.chn_label.setWordWrap(True)
         self.chn_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.chn_label.setMinimumSize(0, 0)
+        self.example_label = QLabel("", self)
+        self.example_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.example_label.setWordWrap(True)
+        self.example_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.example_label.setMinimumSize(0, 0)
+        self.extra_label = QLabel("", self)
+        self.extra_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.extra_label.setWordWrap(True)
+        self.extra_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.extra_label.setMinimumSize(0, 0)
         self.cat_corner = QLabel(self)
         self.cat_corner.setFixedSize(46, 46)
         self._apply_cat_pixmap(self._badge)
@@ -1017,10 +1391,13 @@ class WordWindow(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
         layout.setSizeConstraint(QLayout.SetNoConstraint)
         layout.addWidget(self.eng_label)
+        layout.addWidget(self.meta_label)
         layout.addWidget(self.chn_label)
+        layout.addWidget(self.example_label)
+        layout.addWidget(self.extra_label)
         if self._safe_visible_mode:
             self.setStyleSheet("background:#FFEFD6; border:1px solid #F2C89B;")
         self._apply_fonts()
@@ -1121,7 +1498,7 @@ class WordWindow(QWidget):
         painter.drawEllipse(30, 4, 9, 9)     # toe 3
         painter.drawEllipse(40, 8, 9, 9)     # toe 4
 
-        font = QFont("Consolas", 9)
+        font = QFont(_default_mono_font_family(), 9)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(text_color)
@@ -1192,12 +1569,22 @@ class WordWindow(QWidget):
 
     def _apply_fonts(self):
         eng_size = int(self.fs * font_scale)
-        chn_size = int(self.fs * font_scale)
+        meta_size = max(9, int(self.fs * font_scale * 0.45))
+        chn_size = max(10, int(self.fs * font_scale * 0.68))
+        detail_size = max(9, int(self.fs * font_scale * 0.44))
         self.eng_label.setFont(QFont(ENGfont, eng_size))
+        meta_font = QFont(CHNfont, meta_size)
+        meta_font.setItalic(True)
+        self.meta_label.setFont(meta_font)
         self.chn_label.setFont(QFont(CHNfont, chn_size))
+        self.example_label.setFont(QFont(CHNfont, detail_size))
+        self.extra_label.setFont(QFont(CHNfont, detail_size))
         color = self._word_color or fgcolor
         self.eng_label.setStyleSheet(f"color: {color}; background: transparent;")
+        self.meta_label.setStyleSheet("color: #8E6D5A; background: transparent;")
         self.chn_label.setStyleSheet(f"color: {color}; background: transparent;")
+        self.example_label.setStyleSheet("color: #7A5B4B; background: transparent;")
+        self.extra_label.setStyleSheet("color: #9A6A4C; background: transparent;")
         self._fit_current_text_fonts()
         self.update()
 
@@ -1231,12 +1618,71 @@ class WordWindow(QWidget):
             return
         self._fitting_fonts = True
         eng_target = max(10, int(self.fs * font_scale))
-        chn_target = max(10, int(self.fs * font_scale))
+        meta_target = max(9, int(self.fs * font_scale * 0.45))
+        chn_target = max(10, int(self.fs * font_scale * 0.68))
+        detail_target = max(9, int(self.fs * font_scale * 0.44))
         try:
             self._fit_label_font(self.eng_label, ENGfont, eng_target, 8, wrap=False)
+            self._fit_label_font(self.meta_label, CHNfont, meta_target, 8, wrap=True)
             self._fit_label_font(self.chn_label, CHNfont, chn_target, 8, wrap=True)
+            self._fit_label_font(self.example_label, CHNfont, detail_target, 8, wrap=True)
+            self._fit_label_font(self.extra_label, CHNfont, detail_target, 8, wrap=True)
         finally:
             self._fitting_fonts = False
+
+    def _content_height_hint(self) -> int:
+        avail_w = max(220, self.width() - 48)
+        visible_labels = [
+            self.eng_label,
+            self.meta_label,
+            self.chn_label,
+            self.example_label,
+            self.extra_label,
+        ]
+        total = 40
+        count = 0
+        for label in visible_labels:
+            # Child widgets report isVisible() == False before the parent window is
+            # shown, so use the explicit hidden state here. This keeps startup
+            # layout sizing accurate for example/extra inline text.
+            if label.isHidden() or not (label.text() or "").strip():
+                continue
+            count += 1
+            fm = QFontMetrics(label.font())
+            flags = Qt.TextWordWrap if label.wordWrap() else Qt.TextSingleLine
+            rect = fm.boundingRect(QRect(0, 0, avail_w, 10000), flags, label.text())
+            total += max(rect.height(), fm.height()) + 6
+        total += max(0, count - 1) * 2
+        return max(MIN_WINDOW_HEIGHT, min(MAX_WINDOW_HEIGHT, total))
+
+    def _ensure_content_height(self):
+        if self._is_full_screen:
+            return
+        desired_height = self._content_height_hint()
+        if self.height() >= desired_height:
+            return
+        geom = self.geometry()
+        self.setGeometry(geom.x(), geom.y(), geom.width(), desired_height)
+        self._base_w = self.width()
+        self._base_h = self.height()
+
+    def _sync_content_layout(self, defer_visible_refit: bool = False):
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        self._ensure_content_height()
+        self._fit_current_text_fonts()
+        if defer_visible_refit:
+            QTimer.singleShot(0, self._sync_visible_content_layout)
+
+    def _sync_visible_content_layout(self):
+        if not self.isVisible():
+            return
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        self._ensure_content_height()
+        self._fit_current_text_fonts()
 
     def _refresh_timer(self):
         interval = max(200, int(waitTime * 1000))
@@ -1248,7 +1694,7 @@ class WordWindow(QWidget):
         if not word_items:
             getWord()
         if not word_items:
-            return ("NoLexicon", "璇峰湪绋嬪簭鐩綍鏀惧叆璇嶅簱 .txt")
+            return _empty_entry("NoLexicon", "请在程序目录放入词库 .txt")
         if order == 1:
             item = word_items[word_index % len(word_items)]
             word_index = (word_index + 1) % len(word_items)
@@ -1259,8 +1705,8 @@ class WordWindow(QWidget):
         if not (0 <= index < len(self._word_history)):
             return
         self._history_index = index
-        eng, chn = self._word_history[index]
-        self._apply_word(eng, chn, count_progress=count_progress)
+        entry = self._word_history[index]
+        self._apply_word(entry, count_progress=count_progress)
 
     def _advance_word(self, count_progress: bool = True):
         next_index = self._history_index + 1
@@ -1268,30 +1714,40 @@ class WordWindow(QWidget):
             self._show_history_item(next_index, count_progress=False)
             return
 
-        eng, chn = self._next_word_item()
+        entry = self._next_word_item()
         if self._history_index < len(self._word_history) - 1:
             self._word_history = self._word_history[: self._history_index + 1]
-        self._word_history.append((eng, chn))
+        self._word_history.append(entry)
         self._history_index = len(self._word_history) - 1
-        self._apply_word(eng, chn, count_progress=count_progress)
+        self._apply_word(entry, count_progress=count_progress)
 
     def _previous_word(self):
         if self._history_index <= 0:
             return
         self._show_history_item(self._history_index - 1, count_progress=False)
 
-    def _apply_word(self, eng: str, chn: str, count_progress: bool = True):
-        self.eng_label.setText(eng)
-        self.chn_label.setText(chn)
-        self.chn_label.setAlignment(Qt.AlignLeft if len(chn) > 16 else Qt.AlignCenter)
-        self._fit_current_text_fonts()
-        if not self._safe_visible_mode:
-            QTimer.singleShot(0, self._fit_current_text_fonts)
+    def _apply_word(self, entry: dict, count_progress: bool = True):
+        self._current_entry = entry
+        display_word = entry.get("display_word") or entry.get("word") or ""
+        meaning = entry.get("meaning") or ""
+        meta_text = _format_entry_meta(entry)
+        example_text = entry.get("example") or ""
+        extra_text = entry.get("extra") or ""
+        self.eng_label.setText(display_word)
+        self.meta_label.setText(meta_text)
+        self.meta_label.setVisible(bool(meta_text))
+        self.chn_label.setText(meaning)
+        self.chn_label.setAlignment(Qt.AlignLeft if len(meaning) > 16 else Qt.AlignCenter)
+        self.example_label.setText(f"例句: {example_text}" if example_text else "")
+        self.example_label.setVisible(bool(example_text))
+        self.extra_label.setText(f"拓展: {extra_text}" if extra_text else "")
+        self.extra_label.setVisible(bool(extra_text))
+        self._sync_content_layout(defer_visible_refit=not self._safe_visible_mode)
         self._randomize_cat()
         if count_progress:
             self._increment_daily_count()
         if auto_speak:
-            speak_word(eng)
+            speak_word(entry.get("word", ""))
         self.update()
 
     def next_word(self, force=False, count_progress=True):
@@ -1303,10 +1759,20 @@ class WordWindow(QWidget):
         self._advance_word(count_progress=count_progress)
 
     def _speak_current_word(self):
-        text = self.eng_label.text().strip()
+        text = (self._current_entry or {}).get("word", "").strip()
         if not text:
             return
         speak_word(text)
+
+    def _show_word_details(self):
+        entry = self._current_entry or {}
+        if not entry.get("word"):
+            return
+        dlg = WordDetailDialog(self, entry)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        self._detail_dialog = dlg
 
     def _show_popup(self, title: str, content: str):
         popup = CatPopup(self, title, content)
@@ -1335,22 +1801,31 @@ class WordWindow(QWidget):
             self._speak_current_word()
 
     def _copy_word(self):
-        text = self.eng_label.text().strip()
+        text = (self._current_entry or {}).get("display_word", "").strip()
         if not text:
             return
         if pyperclip is not None:
             pyperclip.copy(text)
         else:
             QApplication.clipboard().setText(text)
-        self._show_popup("澶嶅埗瀹屾垚", f"宸插鍒? {text}")
+        self._show_popup("复制完成", f"已复制: {text}")
 
     def _favourite(self):
         try:
-            with open(_p("鏀惰棌澶?txt"), "a", encoding="utf-8") as f:
-                f.write(f"{self.eng_label.text()} {self.chn_label.text()}\n")
-            self._show_popup("鏀惰棌鎴愬姛", "褰撳墠鍗曡瘝宸插姞鍏ユ敹钘忓す")
+            with open(_p(FAVORITES_FILE), "a", encoding="utf-8") as f:
+                entry = self._current_entry or {}
+                row = [
+                    entry.get("display_word", ""),
+                    entry.get("pos", ""),
+                    entry.get("meaning", ""),
+                    entry.get("example", ""),
+                    entry.get("extra", ""),
+                    entry.get("category", ""),
+                ]
+                f.write("\t".join(row).rstrip() + "\n")
+            self._show_popup("收藏成功", "当前单词已加入收藏")
         except OSError as exc:
-            self._show_popup("鏀惰棌澶辫触", str(exc))
+            self._show_popup("收藏失败", str(exc))
 
     def _set_speed(self):
         global waitTime
@@ -1522,6 +1997,7 @@ class WordWindow(QWidget):
         menu.addSeparator()
         menu.addAction("复制该词", self._copy_word)
         menu.addAction("收藏该词", self._favourite)
+        menu.addAction("查看词条详情", self._show_word_details)
 
         menu.addSeparator()
         word_color_menu = menu.addMenu("单词颜色")
@@ -1652,6 +2128,10 @@ class WordWindow(QWidget):
         self._fit_current_text_fonts()
         self._refresh_daily_count_label()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_content_layout(defer_visible_refit=not self._safe_visible_mode)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Space:
             self._manual_next_word()
@@ -1667,6 +2147,10 @@ class WordWindow(QWidget):
             return
         if event.key() == Qt.Key_R:
             self._speak_current_word()
+            event.accept()
+            return
+        if event.key() == Qt.Key_D:
+            self._show_word_details()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -1721,6 +2205,20 @@ def ensure_assets():
             )
 
 
+def ensure_platform_runtime_ready() -> None:
+    missing = _detect_missing_linux_runtime_packages()
+    if not missing:
+        return
+    install_cmd = f"sudo apt install {' '.join(missing)}"
+    message = (
+        "Ubuntu 缺少 Qt 图形运行时依赖："
+        + ", ".join(missing)
+        + f"。请先执行：{install_cmd}"
+    )
+    _log(message)
+    raise SystemExit(message)
+
+
 def main():
     _log(f"=== startup begin (frozen={getattr(sys, 'frozen', False)}, backend={QT_BACKEND}) ===")
     _log(f"base_dir={BASE_DIR}")
@@ -1729,6 +2227,8 @@ def main():
 
     bootstrap_runtime_files()
     _log("bootstrap_runtime_files ok")
+    ensure_platform_runtime_ready()
+    _log("ensure_platform_runtime_ready ok")
 
     readConfig()
     _log("readConfig ok")
@@ -1741,7 +2241,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("W2R-Cattoon")
-    app.setFont(QFont("Microsoft YaHei UI", 10))
+    normalize_runtime_fonts()
+    app.setFont(QFont(_default_cjk_font_family(), 10))
     app.setQuitOnLastWindowClosed(False)
     icon_path = resolve_app_icon_path()
     if icon_path is not None:
@@ -1827,4 +2328,3 @@ if __name__ == "__main__":
         _log("FATAL EXCEPTION in __main__")
         _log(traceback.format_exc())
         raise
-

@@ -9,12 +9,18 @@ for name in ('preference.ini', 'themes.ini', 'fonts.ini'):
     if p.exists():
         datas.append((str(p), '.'))
 
-icon_file = src_dir / 'assets' / 'app_icon' / 'app.ico'
-if icon_file.exists():
-    datas.append((str(icon_file), str(Path('assets') / 'app_icon')))
+icon_file = None
+for candidate in (
+    src_dir / 'assets' / 'app_icon' / 'app.png',
+    src_dir / 'assets' / 'app_icon' / 'app.ico',
+):
+    if candidate.exists():
+        datas.append((str(candidate), str(Path('assets') / 'app_icon')))
+        if icon_file is None:
+            icon_file = candidate
 
 a = Analysis(
-    ['catword\\W2R.py'],
+    [str(src_dir / 'W2R.py')],
     pathex=[],
     binaries=[],
     datas=datas,
@@ -40,7 +46,7 @@ exe = EXE(
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon=str(icon_file) if icon_file.exists() else None,
+    icon=str(icon_file) if icon_file is not None else None,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
@@ -55,4 +61,3 @@ coll = COLLECT(
     upx_exclude=[],
     name='W2R_Cattoon',
 )
-
