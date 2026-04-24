@@ -1,4 +1,5 @@
-﻿import os
+﻿import ctypes.util
+import os
 import json
 import random
 import re
@@ -22,7 +23,19 @@ QT_BACKEND = "PySide6"
 _pyside6_import_error = None
 try:
     from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
-    from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap
+    from PySide6.QtGui import (
+        QAction,
+        QColor,
+        QCursor,
+        QFont,
+        QFontDatabase,
+        QFontMetrics,
+        QIcon,
+        QPainter,
+        QPainterPath,
+        QPen,
+        QPixmap,
+    )
     from PySide6.QtWidgets import (
         QApplication,
         QDialog,
@@ -46,7 +59,18 @@ except ImportError as _exc_pyside6:
     QT_BACKEND = "PyQt5"
     try:
         from PyQt5.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
-        from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap
+        from PyQt5.QtGui import (
+            QColor,
+            QCursor,
+            QFont,
+            QFontDatabase,
+            QFontMetrics,
+            QIcon,
+            QPainter,
+            QPainterPath,
+            QPen,
+            QPixmap,
+        )
         from PyQt5.QtWidgets import (
             QAction,
             QApplication,
@@ -91,7 +115,12 @@ else:
 LOG_FILE = BASE_DIR / "startup_error.log"
 ASSET_DIR = BASE_DIR / "assets" / "cattoon_v1"
 CAT_DIR = ASSET_DIR / "cats"
-APP_ICON_REL = Path("assets") / "app_icon" / "app.ico"
+APP_ICON_RELS = (
+    Path("assets") / "app_icon" / "app.png",
+    Path("assets") / "app_icon" / "app.ico",
+)
+DEFAULT_LEXICON_FILE = "word_list.txt"
+FAVORITES_FILE = "favorites.txt"
 MIN_WINDOW_HEIGHT = 36
 MAX_WINDOW_HEIGHT = 180
 MIN_WINDOW_WIDTH = 180
@@ -100,6 +129,42 @@ MAX_WINDOW_WIDTH = 960
 
 def _p(name: str) -> str:
     return str(BASE_DIR / name)
+
+
+def _is_windows() -> bool:
+    return sys.platform.startswith("win")
+
+
+def _is_linux() -> bool:
+    return sys.platform.startswith("linux")
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def _has_shared_library(*names: str) -> bool:
+    for name in names:
+        if name and ctypes.util.find_library(name):
+            return True
+    return False
+
+
+def _detect_missing_linux_runtime_packages() -> list[str]:
+    if not _is_linux():
+        return []
+    qt_platform = (os.environ.get("QT_QPA_PLATFORM") or "").strip().lower()
+    if qt_platform and qt_platform not in {"xcb", "wayland", "wayland-egl"}:
+        return []
+    use_xcb = qt_platform in {"", "xcb"} and bool(os.environ.get("DISPLAY"))
+    if not use_xcb:
+        return []
+    missing = []
+    if not _has_shared_library("xcb-cursor", "xcb_cursor"):
+        missing.append("libxcb-cursor0")
+    if not _has_shared_library("xkbcommon-x11"):
+        missing.append("libxkbcommon-x11-0")
+    return missing
 
 
 def _log(message: str):
@@ -124,13 +189,13 @@ def _parse_bool(text: str, default: bool = False) -> bool:
 
 waitTime = 2.0
 default_lexicon = ""
-file = _p("鍗曡瘝琛?txt")
+file = _p(DEFAULT_LEXICON_FILE)
 bgcolor = "#FFEFD6"
 fgcolor = "#4D3B36"
 word_color = fgcolor
 counter_color = "#F7F0E8"
 ENGfont = "Consolas"
-CHNfont = "瀹嬩綋"
+CHNfont = "Sans Serif"
 alpha = 0.96
 isFullScreen = 0
 auto_speak = 0
@@ -149,6 +214,8 @@ themeColors = {
 DEFAULT_THEME_COLORS = dict(themeColors)
 
 fonts = {
+    "通用": ["Monospace", "Sans Serif"],
+    "Ubuntu": ["DejaVu Sans Mono", "Noto Sans CJK SC"],
     "宋体": ["Consolas", "宋体"],
     "微软雅黑": ["Consolas", "微软雅黑"],
     "苹方": ["Consolas", "苹方 常规"],
@@ -180,6 +247,7 @@ _tts_error_hint_shown = False
 _tts_latest_text = ""
 _tts_request_event = threading.Event()
 _tts_current_proc = None
+_tts_current_backend = None
 
 _ENG_TTS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\s\-\+'/]*$")
 _HAS_LETTER_PATTERN = re.compile(r"[A-Za-z]")
@@ -231,10 +299,12 @@ def bootstrap_runtime_files():
                 except OSError:
                     pass
                 break
-    dst_icon = BASE_DIR / APP_ICON_REL
-    if not dst_icon.exists():
+    for rel_path in APP_ICON_RELS:
+        dst_icon = BASE_DIR / rel_path
+        if dst_icon.exists():
+            continue
         for root in _bundled_roots():
-            src_icon = root / APP_ICON_REL
+            src_icon = root / rel_path
             if src_icon.exists():
                 try:
                     dst_icon.parent.mkdir(parents=True, exist_ok=True)
@@ -245,9 +315,10 @@ def bootstrap_runtime_files():
 
 
 def resolve_app_icon_path() -> Path | None:
-    candidates = [BASE_DIR / APP_ICON_REL]
+    candidates = [BASE_DIR / rel_path for rel_path in APP_ICON_RELS]
     for root in _bundled_roots():
-        candidates.append(root / APP_ICON_REL)
+        for rel_path in APP_ICON_RELS:
+            candidates.append(root / rel_path)
     for p in candidates:
         if p.exists():
             return p
@@ -323,6 +394,63 @@ def get_daily_progress_count() -> int:
     return int(daily_progress_count)
 
 
+def _font_database_families() -> set[str]:
+    try:
+        return set(QFontDatabase.families())
+    except TypeError:
+        return set(QFontDatabase().families())
+
+
+def _first_installed_font(candidates, fallback: str | None = None) -> str:
+    families = _font_database_families()
+    for name in candidates:
+        if name in families:
+            return name
+    return fallback or QFont().defaultFamily()
+
+
+def _default_mono_font_family() -> str:
+    return _first_installed_font(
+        [
+            "Consolas",
+            "JetBrains Mono",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "Noto Sans Mono CJK SC",
+            "Monospace",
+        ]
+    )
+
+
+def _default_cjk_font_family() -> str:
+    return _first_installed_font(
+        [
+            "Microsoft YaHei UI",
+            "Microsoft YaHei",
+            "微软雅黑",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "Source Han Sans SC",
+            "WenQuanYi Zen Hei",
+            "DejaVu Sans",
+            "Sans Serif",
+        ]
+    )
+
+
+def normalize_runtime_fonts() -> None:
+    global ENGfont, CHNfont
+    families = _font_database_families()
+    mono = _default_mono_font_family()
+    sans = _default_cjk_font_family()
+    if ENGfont not in families:
+        ENGfont = mono
+    if CHNfont not in families:
+        CHNfont = sans
+    fonts["通用"] = [mono, sans]
+    fonts["Ubuntu"] = [mono, sans]
+
+
 def _build_tts_script():
     return (
         "$ErrorActionPreference='Stop';"
@@ -340,12 +468,21 @@ def _build_tts_script():
     )
 
 
-def _spawn_sapi_speak(text):
+def _tts_backend_hint() -> str:
+    if _is_linux():
+        return "Linux/Ubuntu 请安装 speech-dispatcher（spd-say）或 espeak-ng。"
+    if _is_windows():
+        return "Windows 需要 PowerShell 和系统语音组件。"
+    if _is_macos():
+        return "macOS 需要系统自带的 say 命令。"
+    return "当前平台没有可用的朗读后端。"
+
+
+def _build_windows_tts_command(text: str):
     script = _build_tts_script()
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     env = os.environ.copy()
     env["W2R_TTS_TEXT"] = text
-    return subprocess.Popen(
+    return (
         [
             "powershell.exe",
             "-NoProfile",
@@ -355,18 +492,60 @@ def _spawn_sapi_speak(text):
             "-Command",
             script,
         ],
+        env,
+        getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "windows-sapi",
+    )
+
+
+def _build_tts_command(text: str):
+    if _is_windows():
+        return _build_windows_tts_command(text)
+    if _is_macos() and shutil.which("say"):
+        return (["say", text], None, 0, "macos-say")
+    if _is_linux():
+        if shutil.which("spd-say"):
+            return (["spd-say", "-w", "-r", "-20", text], None, 0, "speech-dispatcher")
+        if shutil.which("espeak-ng"):
+            return (["espeak-ng", "-s", "140", text], None, 0, "espeak-ng")
+        if shutil.which("espeak"):
+            return (["espeak", "-s", "140", text], None, 0, "espeak")
+    raise RuntimeError(_tts_backend_hint())
+
+
+def _spawn_tts_process(text: str):
+    cmd, env, creationflags, backend = _build_tts_command(text)
+    proc = subprocess.Popen(
+        cmd,
         creationflags=creationflags,
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    return proc, backend
+
+
+def _stop_backend_speech(backend: str | None) -> None:
+    if backend == "speech-dispatcher" and shutil.which("spd-say"):
+        try:
+            subprocess.run(
+                ["spd-say", "-S"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            pass
 
 
 def _stop_current_tts():
-    global _tts_current_proc
+    global _tts_current_backend, _tts_current_proc
     with _tts_lock:
         proc = _tts_current_proc
         _tts_current_proc = None
+        backend = _tts_current_backend
+        _tts_current_backend = None
+    _stop_backend_speech(backend)
     if not proc:
         return
     if proc.poll() is None:
@@ -381,7 +560,7 @@ def _stop_current_tts():
 
 
 def _tts_worker_loop():
-    global _tts_error_hint_shown, _tts_current_proc
+    global _tts_current_backend, _tts_error_hint_shown, _tts_current_proc
     while True:
         _tts_request_event.wait()
         _tts_request_event.clear()
@@ -392,15 +571,16 @@ def _tts_worker_loop():
                 break
 
             try:
-                proc = _spawn_sapi_speak(text)
+                proc, backend = _spawn_tts_process(text)
             except Exception as exc:
                 if not _tts_error_hint_shown:
                     _tts_error_hint_shown = True
-                    print(f"[TTS] 缁傝崵鍤庨張妤勵嚢娑撳秴褰查悽顭掔礉瀹歌尪鍤滈崝銊╂缁狙傝礋闂堟瑩绮妴鍌氬斧閸? {exc}")
+                    print(f"[TTS] 朗读不可用：{exc}")
                 break
 
             with _tts_lock:
                 _tts_current_proc = proc
+                _tts_current_backend = backend
 
             interrupted = False
             while proc.poll() is None:
@@ -414,6 +594,7 @@ def _tts_worker_loop():
             with _tts_lock:
                 if _tts_current_proc is proc:
                     _tts_current_proc = None
+                    _tts_current_backend = None
 
             if not interrupted:
                 break
@@ -700,7 +881,7 @@ class CatPopup(QDialog):
             }
             #cat {
                 color: #D58A62;
-                font-family: Consolas;
+                font-family: monospace;
                 font-size: 13px;
             }
             """
@@ -828,7 +1009,7 @@ class CuteColorDialog(QDialog):
                 border-radius: 10px;
                 color: #6A4B3A;
                 background: #FFFFFF;
-                font-family: Consolas;
+                font-family: monospace;
             }
             QSlider::groove:horizontal {
                 border: 1px solid #E8C8A9;
@@ -1121,7 +1302,7 @@ class WordWindow(QWidget):
         painter.drawEllipse(30, 4, 9, 9)     # toe 3
         painter.drawEllipse(40, 8, 9, 9)     # toe 4
 
-        font = QFont("Consolas", 9)
+        font = QFont(_default_mono_font_family(), 9)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(text_color)
@@ -1342,15 +1523,15 @@ class WordWindow(QWidget):
             pyperclip.copy(text)
         else:
             QApplication.clipboard().setText(text)
-        self._show_popup("澶嶅埗瀹屾垚", f"宸插鍒? {text}")
+        self._show_popup("复制完成", f"已复制: {text}")
 
     def _favourite(self):
         try:
-            with open(_p("鏀惰棌澶?txt"), "a", encoding="utf-8") as f:
+            with open(_p(FAVORITES_FILE), "a", encoding="utf-8") as f:
                 f.write(f"{self.eng_label.text()} {self.chn_label.text()}\n")
-            self._show_popup("鏀惰棌鎴愬姛", "褰撳墠鍗曡瘝宸插姞鍏ユ敹钘忓す")
+            self._show_popup("收藏成功", "当前单词已加入收藏")
         except OSError as exc:
-            self._show_popup("鏀惰棌澶辫触", str(exc))
+            self._show_popup("收藏失败", str(exc))
 
     def _set_speed(self):
         global waitTime
@@ -1721,6 +1902,20 @@ def ensure_assets():
             )
 
 
+def ensure_platform_runtime_ready() -> None:
+    missing = _detect_missing_linux_runtime_packages()
+    if not missing:
+        return
+    install_cmd = f"sudo apt install {' '.join(missing)}"
+    message = (
+        "Ubuntu 缺少 Qt 图形运行时依赖："
+        + ", ".join(missing)
+        + f"。请先执行：{install_cmd}"
+    )
+    _log(message)
+    raise SystemExit(message)
+
+
 def main():
     _log(f"=== startup begin (frozen={getattr(sys, 'frozen', False)}, backend={QT_BACKEND}) ===")
     _log(f"base_dir={BASE_DIR}")
@@ -1729,6 +1924,8 @@ def main():
 
     bootstrap_runtime_files()
     _log("bootstrap_runtime_files ok")
+    ensure_platform_runtime_ready()
+    _log("ensure_platform_runtime_ready ok")
 
     readConfig()
     _log("readConfig ok")
@@ -1741,7 +1938,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("W2R-Cattoon")
-    app.setFont(QFont("Microsoft YaHei UI", 10))
+    normalize_runtime_fonts()
+    app.setFont(QFont(_default_cjk_font_family(), 10))
     app.setQuitOnLastWindowClosed(False)
     icon_path = resolve_app_icon_path()
     if icon_path is not None:
@@ -1827,4 +2025,3 @@ if __name__ == "__main__":
         _log("FATAL EXCEPTION in __main__")
         _log(traceback.format_exc())
         raise
-
