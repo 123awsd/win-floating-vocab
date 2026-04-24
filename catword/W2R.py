@@ -971,6 +971,8 @@ class WordWindow(QWidget):
         self._word_color = word_color or fgcolor
         self._counter_color = counter_color
         self._fitting_fonts = False
+        self._word_history = []
+        self._history_index = -1
         self._cat_pixmaps = self._load_cat_pixmaps()
         self._badge = self._cat_pixmaps[0] if self._cat_pixmaps else self._load_badge_pixmap()
         _log(f"cat assets loaded={len(self._cat_pixmaps)} frozen={getattr(sys, 'frozen', False)}")
@@ -1253,6 +1255,31 @@ class WordWindow(QWidget):
             return item
         return random.choice(word_items)
 
+    def _show_history_item(self, index: int, count_progress: bool = False):
+        if not (0 <= index < len(self._word_history)):
+            return
+        self._history_index = index
+        eng, chn = self._word_history[index]
+        self._apply_word(eng, chn, count_progress=count_progress)
+
+    def _advance_word(self, count_progress: bool = True):
+        next_index = self._history_index + 1
+        if next_index < len(self._word_history):
+            self._show_history_item(next_index, count_progress=False)
+            return
+
+        eng, chn = self._next_word_item()
+        if self._history_index < len(self._word_history) - 1:
+            self._word_history = self._word_history[: self._history_index + 1]
+        self._word_history.append((eng, chn))
+        self._history_index = len(self._word_history) - 1
+        self._apply_word(eng, chn, count_progress=count_progress)
+
+    def _previous_word(self):
+        if self._history_index <= 0:
+            return
+        self._show_history_item(self._history_index - 1, count_progress=False)
+
     def _apply_word(self, eng: str, chn: str, count_progress: bool = True):
         self.eng_label.setText(eng)
         self.chn_label.setText(chn)
@@ -1270,12 +1297,10 @@ class WordWindow(QWidget):
     def next_word(self, force=False, count_progress=True):
         if handmode and not force:
             return
-        eng, chn = self._next_word_item()
-        self._apply_word(eng, chn, count_progress=count_progress)
+        self._advance_word(count_progress=count_progress)
 
     def _manual_next_word(self, count_progress=True):
-        eng, chn = self._next_word_item()
-        self._apply_word(eng, chn, count_progress=count_progress)
+        self._advance_word(count_progress=count_progress)
 
     def _speak_current_word(self):
         text = self.eng_label.text().strip()
@@ -1630,6 +1655,18 @@ class WordWindow(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Space:
             self._manual_next_word()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Right:
+            self._manual_next_word()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Left:
+            self._previous_word()
+            event.accept()
+            return
+        if event.key() == Qt.Key_R:
+            self._speak_current_word()
             event.accept()
             return
         super().keyPressEvent(event)
