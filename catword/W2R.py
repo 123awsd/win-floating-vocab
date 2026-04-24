@@ -1355,12 +1355,12 @@ class WordWindow(QWidget):
     def _set_speed(self):
         global waitTime
         value, ok = QInputDialog.getDouble(
-            self, "鎾斁閫熷害", "鍒囨崲鏃堕棿(绉?:", waitTime, 0.5, 30.0, 1
+            self, "播放速度", "切换时间(秒):", waitTime, 0.5, 30.0, 1
         )
         if ok:
             waitTime = value
             self._refresh_timer()
-            self._show_popup("閫熷害鏇存柊", f"鍒囨崲闂撮殧: {waitTime:.1f}s")
+            self._show_popup("速度更新", f"切换间隔: {waitTime:.1f}s")
 
     def _set_theme_by_name(self, name: str):
         global bgcolor, fgcolor
