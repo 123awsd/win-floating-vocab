@@ -92,7 +92,7 @@ LOG_FILE = BASE_DIR / "startup_error.log"
 ASSET_DIR = BASE_DIR / "assets" / "cattoon_v1"
 CAT_DIR = ASSET_DIR / "cats"
 APP_ICON_REL = Path("assets") / "app_icon" / "app.ico"
-MIN_WINDOW_HEIGHT = 36
+MIN_WINDOW_HEIGHT = 72
 MAX_WINDOW_HEIGHT = 180
 MIN_WINDOW_WIDTH = 180
 MAX_WINDOW_WIDTH = 960
@@ -192,6 +192,12 @@ isFullScreen = 0
 auto_speak = 0
 order = 0
 handmode = 1
+sedentary_enabled = 0
+sedentary_level = "中提醒"
+sedentary_interval_minutes = 45
+sedentary_range_mode = "工作时段"
+sedentary_range_start = "09:00"
+sedentary_range_end = "18:00"
 
 ui_theme = "cattoon_v1"
 window_radius = 22
@@ -334,6 +340,44 @@ def _normalize_tts_text(text: str) -> str:
 
 def _today_str() -> str:
     return date.today().isoformat()
+
+
+def _time_text_to_minutes(text: str) -> int | None:
+    try:
+        parts = str(text or "").strip().split(":")
+        if len(parts) != 2:
+            return None
+        hour = int(parts[0])
+        minute = int(parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour * 60 + minute
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_time_text(text: str, default: str) -> str:
+    minutes = _time_text_to_minutes(text)
+    if minutes is None:
+        return default
+    hour, minute = divmod(minutes, 60)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _current_minutes_of_day() -> int:
+    now = datetime.now()
+    return now.hour * 60 + now.minute
+
+
+def _is_now_in_time_range(start_text: str, end_text: str) -> bool:
+    start = _time_text_to_minutes(start_text)
+    end = _time_text_to_minutes(end_text)
+    if start is None or end is None or start == end:
+        return True
+    current = _current_minutes_of_day()
+    if start < end:
+        return start <= current < end
+    return current >= start or current < end
 
 
 def _sync_daily_progress_date() -> None:
@@ -607,6 +651,8 @@ def readConfig():
     global word_color, counter_color
     global ui_theme, window_radius, font_scale, default_lexicon, file
     global themeColors, fonts, alphaValues
+    global sedentary_enabled, sedentary_level, sedentary_interval_minutes
+    global sedentary_range_mode, sedentary_range_start, sedentary_range_end
     if not isinstance(themeColors, dict):
         themeColors = dict(DEFAULT_THEME_COLORS)
     if not isinstance(fonts, dict):
@@ -645,6 +691,19 @@ def readConfig():
         default_lexicon = extra_pairs.get("default_lexicon", default_lexicon).strip()
         word_color = extra_pairs.get("word_color", word_color or fgcolor).strip() or fgcolor
         counter_color = extra_pairs.get("counter_color", counter_color).strip() or "#F7F0E8"
+        sedentary_enabled = 1 if _parse_bool(extra_pairs.get("sedentary_enabled"), bool(sedentary_enabled)) else 0
+        sedentary_level = extra_pairs.get("sedentary_level", sedentary_level).strip() or sedentary_level
+        if sedentary_level not in {"弱提醒", "中提醒", "强提醒"}:
+            sedentary_level = "中提醒"
+        try:
+            sedentary_interval_minutes = max(1, min(180, int(float(extra_pairs.get("sedentary_interval_minutes", sedentary_interval_minutes)))))
+        except ValueError:
+            sedentary_interval_minutes = 45
+        sedentary_range_mode = extra_pairs.get("sedentary_range_mode", sedentary_range_mode).strip() or "工作时段"
+        if sedentary_range_mode not in {"全天", "工作时段", "自定义"}:
+            sedentary_range_mode = "工作时段"
+        sedentary_range_start = _normalize_time_text(extra_pairs.get("sedentary_range_start", sedentary_range_start), "09:00")
+        sedentary_range_end = _normalize_time_text(extra_pairs.get("sedentary_range_end", sedentary_range_end), "18:00")
         # v2: user-facing "transparency" value, where larger means more transparent.
         transparency_text = extra_pairs.get("transparency", "")
         if transparency_text:
@@ -693,6 +752,12 @@ def saveConfig(geometry_str: str, fs: int):
         f.write(f"default_lexicon={default_lexicon}\n")
         f.write(f"word_color={word_color}\n")
         f.write(f"counter_color={counter_color}\n")
+        f.write(f"sedentary_enabled={sedentary_enabled}\n")
+        f.write(f"sedentary_level={sedentary_level}\n")
+        f.write(f"sedentary_interval_minutes={sedentary_interval_minutes}\n")
+        f.write(f"sedentary_range_mode={sedentary_range_mode}\n")
+        f.write(f"sedentary_range_start={sedentary_range_start}\n")
+        f.write(f"sedentary_range_end={sedentary_range_end}\n")
         f.write(f"transparency={_alpha_to_transparency(alpha):.2f}\n")
 
 
@@ -849,6 +914,143 @@ class CatPopup(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self.anim.start()
+
+
+class SedentaryReminderDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        title: str,
+        content: str,
+        strong: bool = False,
+        auto_close_ms: int = 0,
+    ):
+        super().__init__(parent)
+        self._strong = bool(strong)
+        self._auto_close_ms = max(0, int(auto_close_ms))
+        self._ack_callback = None
+        self._snooze_callback = None
+        self.setWindowTitle(title)
+        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setModal(False)
+        self.resize(310, 168 if strong else 156)
+
+        card = QWidget(self)
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 12, 16, 12)
+        card_layout.setSpacing(10)
+
+        title_label = DragHandleLabel(title, target_window=self)
+        title_label.setObjectName("title")
+        body_label = QLabel(content)
+        body_label.setObjectName("message")
+        body_label.setWordWrap(True)
+        cat_label = QLabel("(=^･ω･^=)ﾉ 喝口水再走走呀")
+        cat_label.setObjectName("cat")
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        snooze_btn = QPushButton("稍后10分钟")
+        ack_btn = QPushButton("我已活动")
+        snooze_btn.clicked.connect(self._handle_snooze)
+        ack_btn.clicked.connect(self._handle_ack)
+        button_row.addWidget(snooze_btn)
+        button_row.addWidget(ack_btn)
+
+        card_layout.addWidget(title_label)
+        card_layout.addWidget(body_label)
+        card_layout.addWidget(cat_label)
+        card_layout.addLayout(button_row)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.addWidget(card)
+
+        border = "#E58B6B" if strong else "#F2C89B"
+        button_bg = "#FFD8CF" if strong else "#FFE7CC"
+        card_bg = "#FFF2EE" if strong else "#FFF7EC"
+        self.setStyleSheet(
+            f"""
+            QDialog {{
+                background: {card_bg};
+                border: 1px solid {border};
+                border-radius: 18px;
+            }}
+            #card {{
+                background: {card_bg};
+                border: none;
+                border-radius: 18px;
+            }}
+            #title {{
+                color: #6A4B3A;
+                font-size: 15px;
+                font-weight: 700;
+            }}
+            #message {{
+                color: #6A4B3A;
+                font-size: 13px;
+            }}
+            #cat {{
+                color: #D58A62;
+                font-family: Consolas;
+                font-size: 13px;
+            }}
+            QPushButton {{
+                background: {button_bg};
+                border: 1px solid {border};
+                border-radius: 9px;
+                padding: 6px 12px;
+                color: #6A4B3A;
+            }}
+            QPushButton:hover {{
+                background: #FFF2E7;
+            }}
+            """
+        )
+
+        self.setWindowOpacity(0.0)
+        self.anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self.anim.setDuration(220)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        self._close_timer = QTimer(self)
+        self._close_timer.setSingleShot(True)
+        self._close_timer.timeout.connect(self.close)
+
+    def set_callbacks(self, ack_callback, snooze_callback):
+        self._ack_callback = ack_callback
+        self._snooze_callback = snooze_callback
+
+    def _handle_ack(self):
+        if callable(self._ack_callback):
+            self._ack_callback()
+        self.close()
+
+    def _handle_snooze(self):
+        if callable(self._snooze_callback):
+            self._snooze_callback()
+        self.close()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.anim.start()
+        if self._auto_close_ms and not self._strong:
+            self._close_timer.start(self._auto_close_ms)
+
+    def enterEvent(self, event):
+        if self._close_timer.isActive():
+            self._close_timer.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self._auto_close_ms and not self._strong:
+            self._close_timer.start(self._auto_close_ms)
+        super().leaveEvent(event)
 
 
 class CuteColorDialog(QDialog):
@@ -1083,9 +1285,9 @@ class CuteColorDialog(QDialog):
 class WordWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.resize(420, 120)
-        self._base_w = 420
-        self._base_h = 120
+        self.resize(520, 146)
+        self._base_w = 520
+        self._base_h = 146
         self._scale = 1.0
         self.fs = 28
         self.word_radius = window_radius
@@ -1100,6 +1302,13 @@ class WordWindow(QWidget):
         self._fitting_fonts = False
         self._history = []
         self._history_pos = -1
+        self._sedentary_last_reset = time.monotonic()
+        self._sedentary_snooze_until = 0.0
+        self._sedentary_cooldown_until = 0.0
+        self._sedentary_highlight_until = 0.0
+        self._sedentary_hint_text = ""
+        self._sedentary_auto_paused = False
+        self._sedentary_dialog = None
         self._cat_pixmaps = self._load_cat_pixmaps()
         self._badge = self._cat_pixmaps[0] if self._cat_pixmaps else self._load_badge_pixmap()
         _log(f"cat assets loaded={len(self._cat_pixmaps)} frozen={getattr(sys, 'frozen', False)}")
@@ -1141,9 +1350,14 @@ class WordWindow(QWidget):
         self.daily_count_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.daily_count_label.setFixedSize(56, 46)
         self._refresh_daily_count_label()
+        self.sedentary_label = QLabel(self)
+        self.sedentary_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.sedentary_label.setFixedSize(82, 24)
+        self._refresh_sedentary_label()
+        self.sedentary_label.lower()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setContentsMargins(18, 16, 18, 40)
         layout.setSpacing(4)
         layout.setSizeConstraint(QLayout.SetNoConstraint)
         layout.addWidget(self.eng_label)
@@ -1155,6 +1369,17 @@ class WordWindow(QWidget):
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self._on_auto_change)
         self._refresh_timer()
+        self.sedentary_timer = QTimer(self)
+        self.sedentary_timer.setInterval(15000)
+        self.sedentary_timer.timeout.connect(self._check_sedentary_reminder)
+        self.sedentary_timer.start()
+        self.sedentary_clock_timer = QTimer(self)
+        self.sedentary_clock_timer.setInterval(1000)
+        self.sedentary_clock_timer.timeout.connect(self._refresh_sedentary_label)
+        self.sedentary_clock_timer.start()
+        self.sedentary_effect_timer = QTimer(self)
+        self.sedentary_effect_timer.setInterval(180)
+        self.sedentary_effect_timer.timeout.connect(self._refresh_sedentary_effect)
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
@@ -1190,6 +1415,57 @@ class WordWindow(QWidget):
                 best_diff = d
                 best_name = name
         return best_name
+
+    def _current_sedentary_level(self) -> str:
+        return sedentary_level if sedentary_level in {"弱提醒", "中提醒", "强提醒"} else "中提醒"
+
+    def _current_sedentary_interval_name(self) -> str:
+        return f"{int(sedentary_interval_minutes)} 分钟"
+
+    def _current_sedentary_range_name(self) -> str:
+        if sedentary_range_mode == "全天":
+            return "全天"
+        if sedentary_range_mode == "工作时段":
+            return "工作时段"
+        return f"自定义 {sedentary_range_start}-{sedentary_range_end}"
+
+    def _sedentary_range_text(self) -> str:
+        if sedentary_range_mode == "全天":
+            return "全天"
+        if sedentary_range_mode == "工作时段":
+            return "09:00-18:00"
+        return f"{sedentary_range_start}-{sedentary_range_end}"
+
+    def _is_sedentary_time_allowed(self) -> bool:
+        if sedentary_range_mode == "全天":
+            return True
+        if sedentary_range_mode == "工作时段":
+            return _is_now_in_time_range("09:00", "18:00")
+        return _is_now_in_time_range(sedentary_range_start, sedentary_range_end)
+
+    def _persist_current_config(self):
+        geom = self.geometry()
+        geometry_str = f"{geom.width()}x{geom.height()}+{geom.x()}+{geom.y()}"
+        saveConfig(geometry_str, self.fs)
+
+    def _current_sedentary_elapsed_seconds(self) -> int:
+        now = time.monotonic()
+        if self._sedentary_snooze_until > now:
+            remaining = max(0, int(round(self._sedentary_snooze_until - now)))
+            return -remaining
+        return max(0, int(round(now - self._sedentary_last_reset)))
+
+    def _format_sedentary_elapsed_text(self) -> str:
+        seconds = self._current_sedentary_elapsed_seconds()
+        if seconds < 0:
+            remaining = abs(seconds)
+            minutes, sec = divmod(remaining, 60)
+            return f"{minutes:02d}:{sec:02d}"
+        minutes, sec = divmod(seconds, 60)
+        if minutes >= 60:
+            hour, minute = divmod(minutes, 60)
+            return f"{hour:02d}:{minute:02d}"
+        return f"{minutes:02d}:{sec:02d}"
 
     def _load_badge_pixmap(self):
         # Prefer PNG assets first. In frozen Windows builds, some Qt5 SVG
@@ -1258,6 +1534,11 @@ class WordWindow(QWidget):
         self.daily_count_label.setPixmap(self._build_paw_counter_pixmap(text))
         self.daily_count_label.move(10, 8)
 
+    def _refresh_sedentary_label(self):
+        self.sedentary_label.setPixmap(self._build_sedentary_badge_pixmap(self._format_sedentary_elapsed_text()))
+        self.sedentary_label.move(12, max(12, self.height() - self.sedentary_label.height() - 8))
+        self.sedentary_label.lower()
+
     def _build_paw_counter_pixmap(self, text: str) -> QPixmap:
         w, h = 56, 46
         pix = QPixmap(w, h)
@@ -1282,6 +1563,31 @@ class WordWindow(QWidget):
         painter.setFont(font)
         painter.setPen(text_color)
         painter.drawText(QRect(15, 17, 28, 18), Qt.AlignCenter, text)
+        painter.end()
+        return pix
+
+    def _build_sedentary_badge_pixmap(self, text: str) -> QPixmap:
+        w, h = 82, 24
+        pix = QPixmap(w, h)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        bg = QColor("#FFF4E3")
+        accent = QColor("#D78C62")
+        if sedentary_enabled and self._current_sedentary_elapsed_seconds() >= int(sedentary_interval_minutes) * 60:
+            bg = QColor("#FFF0EC")
+            accent = QColor("#C76752")
+
+        painter.setBrush(bg)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRect(1, 1, w - 2, h - 2), 12, 12)
+
+        font = QFont("Consolas", 8)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(accent)
+        painter.drawText(QRect(0, 0, w, h), Qt.AlignCenter, text)
         painter.end()
         return pix
 
@@ -1397,7 +1703,111 @@ class WordWindow(QWidget):
     def _refresh_timer(self):
         interval = max(200, int(waitTime * 1000))
         self.auto_timer.setInterval(interval)
-        self.auto_timer.start()
+        if self._sedentary_auto_paused:
+            self.auto_timer.stop()
+        else:
+            self.auto_timer.start()
+
+    def _refresh_sedentary_effect(self):
+        now = time.monotonic()
+        if now >= self._sedentary_highlight_until:
+            self._sedentary_highlight_until = 0.0
+            self._sedentary_hint_text = ""
+            self.sedentary_effect_timer.stop()
+        self.update()
+
+    def _close_sedentary_dialog(self):
+        dialog = self._sedentary_dialog
+        self._sedentary_dialog = None
+        if dialog is not None:
+            dialog.close()
+
+    def _on_sedentary_dialog_destroyed(self, *args):
+        self._sedentary_dialog = None
+
+    def _reposition_sedentary_dialog(self):
+        dialog = self._sedentary_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        offset_x = self.width() // 2 - dialog.width() // 2
+        offset_y = self.height() + 14 if not self._sedentary_auto_paused else self.height() // 2 - dialog.height() // 2
+        dialog.move(self.x() + max(0, offset_x), self.y() + max(0, offset_y))
+
+    def _reset_sedentary_timer(self, show_feedback: bool = False):
+        self._sedentary_last_reset = time.monotonic()
+        self._sedentary_snooze_until = 0.0
+        self._sedentary_cooldown_until = self._sedentary_last_reset + 10.0
+        self._sedentary_hint_text = ""
+        self._sedentary_highlight_until = 0.0
+        self._sedentary_auto_paused = False
+        self._refresh_timer()
+        self._close_sedentary_dialog()
+        self._refresh_sedentary_label()
+        self.update()
+        if show_feedback:
+            self._show_popup("久坐提醒", "已重置计时，下一轮重新开始")
+
+    def _snooze_sedentary(self, minutes: int = 10):
+        now = time.monotonic()
+        self._sedentary_snooze_until = now + max(1, int(minutes)) * 60.0
+        self._sedentary_cooldown_until = self._sedentary_snooze_until
+        self._sedentary_hint_text = ""
+        self._sedentary_highlight_until = 0.0
+        self._sedentary_auto_paused = False
+        self._refresh_timer()
+        self._close_sedentary_dialog()
+        self._refresh_sedentary_label()
+        self.update()
+        self._show_popup("久坐提醒", f"已稍后 {int(minutes)} 分钟")
+
+    def _show_sedentary_hint(self, message: str, duration_ms: int = 6000):
+        self._sedentary_hint_text = message
+        self._sedentary_highlight_until = time.monotonic() + max(1000, int(duration_ms)) / 1000.0
+        self.sedentary_effect_timer.start()
+        self._randomize_cat()
+        self.update()
+
+    def _show_sedentary_dialog(self, title: str, content: str, strong: bool = False, auto_close_ms: int = 0):
+        self._close_sedentary_dialog()
+        dialog = SedentaryReminderDialog(self, title, content, strong=strong, auto_close_ms=auto_close_ms)
+        dialog.set_callbacks(
+            ack_callback=lambda: self._reset_sedentary_timer(show_feedback=False),
+            snooze_callback=lambda: self._snooze_sedentary(10),
+        )
+        self._sedentary_dialog = dialog
+        dialog.destroyed.connect(self._on_sedentary_dialog_destroyed)
+        self._reposition_sedentary_dialog()
+        dialog.show()
+
+    def _trigger_sedentary_reminder(self):
+        now = time.monotonic()
+        self._sedentary_cooldown_until = now + 300.0
+        level = self._current_sedentary_level()
+        message = f"已经坐了 {int(sedentary_interval_minutes)} 分钟，起来活动 2 分钟，顺手喝口水吧 ૮₍ ˶ᵔ ᵕ ᵔ˶ ₎ა"
+        if level == "弱提醒":
+            self._show_sedentary_hint("起来走走，喝口水呀 (=^･ω･^=)", duration_ms=6500)
+            return
+        if level == "中提醒":
+            self._show_sedentary_hint("活动一下，再喝口水吧 ૮₍ ˶ᵔ ᵕ ᵔ˶ ₎ა", duration_ms=8000)
+            self._show_sedentary_dialog("久坐提醒", message, strong=False, auto_close_ms=8000)
+            return
+        self._sedentary_auto_paused = True
+        self._refresh_timer()
+        self._show_sedentary_hint("先起来活动活动，再喝口水喔 (=^･ω･^=)ﾉ", duration_ms=10000)
+        QApplication.beep()
+        self._show_sedentary_dialog("强提醒", message + " 自动切词已暂停。", strong=True, auto_close_ms=0)
+
+    def _check_sedentary_reminder(self):
+        if not sedentary_enabled:
+            return
+        if not self._is_sedentary_time_allowed():
+            return
+        now = time.monotonic()
+        if now < self._sedentary_snooze_until or now < self._sedentary_cooldown_until:
+            return
+        if now - self._sedentary_last_reset < max(1, int(sedentary_interval_minutes)) * 60.0:
+            return
+        self._trigger_sedentary_reminder()
 
     def _next_word_item(self):
         global word_index
@@ -1495,6 +1905,86 @@ class WordWindow(QWidget):
         set_tts_enabled(bool(checked))
         if checked:
             self._speak_current_word()
+
+    def _set_sedentary_enabled(self, checked: bool):
+        global sedentary_enabled
+        sedentary_enabled = 1 if checked else 0
+        if sedentary_enabled:
+            self._reset_sedentary_timer(show_feedback=False)
+            self._show_popup("久坐提醒", f"已开启，间隔 {int(sedentary_interval_minutes)} 分钟")
+        else:
+            self._sedentary_auto_paused = False
+            self._refresh_timer()
+            self._close_sedentary_dialog()
+            self._sedentary_hint_text = ""
+            self._sedentary_highlight_until = 0.0
+            self._refresh_sedentary_label()
+            self.update()
+            self._show_popup("久坐提醒", "已关闭")
+        self._persist_current_config()
+
+    def _set_sedentary_level(self, level: str):
+        global sedentary_level
+        if level not in {"弱提醒", "中提醒", "强提醒"}:
+            return
+        sedentary_level = level
+        self._persist_current_config()
+        self._show_popup("提醒强度", f"当前为 {level}")
+
+    def _set_sedentary_interval(self, minutes: int):
+        global sedentary_interval_minutes
+        sedentary_interval_minutes = max(1, min(180, int(minutes)))
+        self._reset_sedentary_timer(show_feedback=False)
+        self._persist_current_config()
+        self._show_popup("提醒间隔", f"每 {sedentary_interval_minutes} 分钟提醒一次")
+
+    def _customize_sedentary_interval(self):
+        value, ok = QInputDialog.getInt(
+            self,
+            "提醒间隔",
+            "输入提醒间隔（分钟）:",
+            int(sedentary_interval_minutes),
+            1,
+            180,
+            1,
+        )
+        if not ok:
+            return
+        self._set_sedentary_interval(value)
+
+    def _set_sedentary_range(self, mode: str, start: str | None = None, end: str | None = None):
+        global sedentary_range_mode, sedentary_range_start, sedentary_range_end
+        if mode not in {"全天", "工作时段", "自定义"}:
+            return
+        sedentary_range_mode = mode
+        if mode == "工作时段":
+            sedentary_range_start = "09:00"
+            sedentary_range_end = "18:00"
+        elif mode == "自定义":
+            sedentary_range_start = _normalize_time_text(start, sedentary_range_start)
+            sedentary_range_end = _normalize_time_text(end, sedentary_range_end)
+        self._reset_sedentary_timer(show_feedback=False)
+        self._persist_current_config()
+        self._show_popup("提醒区间", f"当前区间：{self._sedentary_range_text()}")
+
+    def _customize_sedentary_range(self):
+        value, ok = QInputDialog.getText(
+            self,
+            "提醒区间",
+            "输入提醒区间（HH:MM-HH:MM）:",
+            text=f"{sedentary_range_start}-{sedentary_range_end}",
+        )
+        if not ok:
+            return
+        text = str(value).strip()
+        if "-" not in text:
+            self._show_popup("提醒区间", "格式应为 09:00-18:00")
+            return
+        start_text, end_text = [part.strip() for part in text.split("-", 1)]
+        if _time_text_to_minutes(start_text) is None or _time_text_to_minutes(end_text) is None:
+            self._show_popup("提醒区间", "时间格式无效，请使用 HH:MM")
+            return
+        self._set_sedentary_range("自定义", start_text, end_text)
 
     def _copy_word(self):
         text = self.eng_label.text().strip()
@@ -1739,9 +2229,7 @@ class WordWindow(QWidget):
         self.update()
 
     def _save_pref(self):
-        geom = self.geometry()
-        geometry_str = f"{geom.width()}x{geom.height()}+{geom.x()}+{geom.y()}"
-        saveConfig(geometry_str, self.fs)
+        self._persist_current_config()
         self._show_popup("保存成功", "配置已保存")
 
     def _restore_pref(self):
@@ -1754,6 +2242,7 @@ class WordWindow(QWidget):
         self._counter_color = counter_color or "#F7F0E8"
         self._apply_fonts()
         self._refresh_daily_count_label()
+        self._reset_sedentary_timer(show_feedback=False)
         self._refresh_timer()
         self.update()
         self._show_popup("恢复完成", "已载入配置")
@@ -1772,17 +2261,8 @@ class WordWindow(QWidget):
             action.setChecked(name == current)
             action.triggered.connect(lambda checked=False, n=name: self._set_lexicon(n))
 
-    def _show_context_menu(self, pos):
-        global themeColors, fonts, alphaValues
-        if not isinstance(themeColors, dict):
-            themeColors = dict(DEFAULT_THEME_COLORS)
-        if not isinstance(fonts, dict):
-            fonts = dict(DEFAULT_FONTS)
-        if not isinstance(alphaValues, dict):
-            alphaValues = dict(DEFAULT_ALPHA_VALUES)
-        menu = QMenu(self)
-        menu.setStyleSheet(
-            """
+    def _context_menu_style(self) -> str:
+        return """
             QMenu {
                 background: #FFF7EC;
                 border: 2px solid #F2C89B;
@@ -1798,75 +2278,225 @@ class WordWindow(QWidget):
                 background: #FFE0BA;
             }
             """
-        )
 
-        # Section 1: frequently used actions (top)
-        menu.addAction("朗读当前词", self._speak_current_word)
-        auto_action = QAction("自动朗读", self, checkable=True)
-        auto_action.setChecked(bool(auto_speak))
-        auto_action.toggled.connect(self._toggle_auto_speak)
-        menu.addAction(auto_action)
-        menu.addAction("播放速度", self._set_speed)
-        menu.addAction("复制该词", self._copy_word)
-        menu.addAction("收藏该词", self._favourite)
-        menu.addAction("清零今日计数", self._reset_daily_count)
-
-        # Section 2: arrow sub-menus grouped in the middle
-        menu.addSeparator()
-        mode_menu = menu.addMenu("播放模式")
-        mode_manual = mode_menu.addAction("手动")
-        mode_manual.setCheckable(True)
-        mode_manual.setChecked(handmode == 1)
-        mode_manual.triggered.connect(lambda checked=False: self._set_play_mode(True))
-        mode_auto = mode_menu.addAction("自动")
-        mode_auto.setCheckable(True)
-        mode_auto.setChecked(handmode == 0)
-        mode_auto.triggered.connect(lambda checked=False: self._set_play_mode(False))
-
-        order_menu = menu.addMenu("播放顺序")
-        order_seq = order_menu.addAction("顺序")
-        order_seq.setCheckable(True)
-        order_seq.setChecked(order == 1)
-        order_seq.triggered.connect(lambda checked=False: self._set_order_mode(True))
-        order_rand = order_menu.addAction("随机")
-        order_rand.setCheckable(True)
-        order_rand.setChecked(order == 0)
-        order_rand.triggered.connect(lambda checked=False: self._set_order_mode(False))
-
-        word_color_menu = menu.addMenu("单词颜色")
-        word_color_menu.addAction("打开调色板", self._pick_word_color_palette)
-        counter_color_menu = menu.addMenu("数字颜色")
-        counter_color_menu.addAction("打开调色板", self._pick_counter_color_palette)
-        theme_menu = menu.addMenu("主题色")
-        current_theme = self._current_theme_name()
-        for theme_name in themeColors.keys():
-            action = theme_menu.addAction(theme_name)
-            action.setCheckable(True)
-            action.setChecked(theme_name == current_theme)
-            action.triggered.connect(
-                lambda checked=False, n=theme_name: self._set_theme_by_name(n)
+    def _build_named_menu_items(self, names, current_name, handler):
+        items = []
+        for name in names:
+            items.append(
+                {
+                    "type": "check",
+                    "text": name,
+                    "checked": name == current_name,
+                    "handler": (lambda checked=False, n=name: handler(n)),
+                }
             )
+        return items
 
-        font_menu = menu.addMenu("字体")
-        current_font = self._current_font_name()
-        for font_name in fonts.keys():
-            action = font_menu.addAction(font_name)
-            action.setCheckable(True)
-            action.setChecked(font_name == current_font)
-            action.triggered.connect(
-                lambda checked=False, n=font_name: self._set_font_by_name(n)
-            )
+    def _context_menu_spec(self):
+        return [
+            {"type": "action", "text": "朗读当前词", "handler": self._speak_current_word},
+            {
+                "type": "check",
+                "text": "自动朗读",
+                "checked": bool(auto_speak),
+                "handler": self._toggle_auto_speak,
+                "signal": "toggled",
+            },
+            {"type": "action", "text": "播放速度", "handler": self._set_speed},
+            {"type": "action", "text": "复制该词", "handler": self._copy_word},
+            {"type": "action", "text": "收藏该词", "handler": self._favourite},
+            {"type": "action", "text": "清零今日计数", "handler": self._reset_daily_count},
+            {"type": "separator"},
+            {
+                "type": "submenu",
+                "text": "久坐提醒",
+                "items": [
+                    {
+                        "type": "check",
+                        "text": "启用久坐提醒",
+                        "checked": bool(sedentary_enabled),
+                        "handler": self._set_sedentary_enabled,
+                        "signal": "toggled",
+                    },
+                    {
+                        "type": "submenu",
+                        "text": "提醒强度",
+                        "items": self._build_named_menu_items(
+                            ["弱提醒", "中提醒", "强提醒"],
+                            self._current_sedentary_level(),
+                            self._set_sedentary_level,
+                        ),
+                    },
+                    {
+                        "type": "submenu",
+                        "text": "提醒间隔",
+                        "items": (
+                            [
+                                {
+                                    "type": "check",
+                                    "text": f"{minutes} 分钟",
+                                    "checked": int(sedentary_interval_minutes) == minutes,
+                                    "handler": (lambda checked=False, m=minutes: self._set_sedentary_interval(m)),
+                                }
+                                for minutes in (30, 45, 60, 90, 120)
+                            ]
+                            + [
+                                {"type": "separator"},
+                                {
+                                    "type": "action",
+                                    "text": f"自定义 ({int(sedentary_interval_minutes)} 分钟)",
+                                    "handler": self._customize_sedentary_interval,
+                                },
+                            ]
+                        ),
+                    },
+                    {
+                        "type": "submenu",
+                        "text": "提醒区间",
+                        "items": [
+                            {
+                                "type": "check",
+                                "text": "全天",
+                                "checked": sedentary_range_mode == "全天",
+                                "handler": lambda checked=False: self._set_sedentary_range("全天"),
+                            },
+                            {
+                                "type": "check",
+                                "text": "工作时段 09:00-18:00",
+                                "checked": sedentary_range_mode == "工作时段",
+                                "handler": lambda checked=False: self._set_sedentary_range("工作时段"),
+                            },
+                            {
+                                "type": "check",
+                                "text": f"自定义 {sedentary_range_start}-{sedentary_range_end}",
+                                "checked": sedentary_range_mode == "自定义",
+                                "handler": self._customize_sedentary_range,
+                            },
+                        ],
+                    },
+                    {"type": "action", "text": "重置久坐计时", "handler": lambda: self._reset_sedentary_timer(show_feedback=True)},
+                ],
+            },
+            {"type": "separator"},
+            {
+                "type": "submenu",
+                "text": "播放模式",
+                "items": [
+                    {
+                        "type": "check",
+                        "text": "手动",
+                        "checked": handmode == 1,
+                        "handler": lambda checked=False: self._set_play_mode(True),
+                    },
+                    {
+                        "type": "check",
+                        "text": "自动",
+                        "checked": handmode == 0,
+                        "handler": lambda checked=False: self._set_play_mode(False),
+                    },
+                ],
+            },
+            {
+                "type": "submenu",
+                "text": "播放顺序",
+                "items": [
+                    {
+                        "type": "check",
+                        "text": "顺序",
+                        "checked": order == 1,
+                        "handler": lambda checked=False: self._set_order_mode(True),
+                    },
+                    {
+                        "type": "check",
+                        "text": "随机",
+                        "checked": order == 0,
+                        "handler": lambda checked=False: self._set_order_mode(False),
+                    },
+                ],
+            },
+            {
+                "type": "submenu",
+                "text": "单词颜色",
+                "items": [
+                    {
+                        "type": "action",
+                        "text": "打开调色板",
+                        "handler": self._pick_word_color_palette,
+                    }
+                ],
+            },
+            {
+                "type": "submenu",
+                "text": "数字颜色",
+                "items": [
+                    {
+                        "type": "action",
+                        "text": "打开调色板",
+                        "handler": self._pick_counter_color_palette,
+                    }
+                ],
+            },
+            {
+                "type": "submenu",
+                "text": "主题色",
+                "items": self._build_named_menu_items(
+                    themeColors.keys(), self._current_theme_name(), self._set_theme_by_name
+                ),
+            },
+            {
+                "type": "submenu",
+                "text": "字体",
+                "items": self._build_named_menu_items(
+                    fonts.keys(), self._current_font_name(), self._set_font_by_name
+                ),
+            },
+            {"type": "action", "text": "透明度调节", "handler": self._open_alpha_slider},
+            {"type": "submenu", "text": "切换词库", "builder": self._rebuild_lexicon_menu},
+            {"type": "separator"},
+            {"type": "action", "text": "全屏模式", "handler": self._toggle_fullscreen},
+            {"type": "action", "text": "保存配置", "handler": self._save_pref},
+            {"type": "action", "text": "恢复配置", "handler": self._restore_pref},
+            {"type": "action", "text": "退出", "handler": self._request_quit},
+        ]
 
-        menu.addAction("透明度调节", self._open_alpha_slider)
-        lexicon_menu = menu.addMenu("切换词库")
-        self._rebuild_lexicon_menu(lexicon_menu)
+    def _populate_menu_from_spec(self, menu: QMenu, spec):
+        for item in spec:
+            item_type = item.get("type")
+            if item_type == "separator":
+                menu.addSeparator()
+                continue
+            if item_type == "action":
+                menu.addAction(item["text"], item["handler"])
+                continue
+            if item_type == "check":
+                action = QAction(item["text"], self, checkable=True)
+                action.setChecked(bool(item.get("checked", False)))
+                signal_name = item.get("signal", "triggered")
+                if signal_name == "toggled":
+                    action.toggled.connect(item["handler"])
+                else:
+                    action.triggered.connect(item["handler"])
+                menu.addAction(action)
+                continue
+            if item_type == "submenu":
+                submenu = menu.addMenu(item["text"])
+                builder = item.get("builder")
+                if builder is not None:
+                    builder(submenu)
+                else:
+                    self._populate_menu_from_spec(submenu, item.get("items", []))
 
-        # Section 3: persistence & app control (bottom)
-        menu.addSeparator()
-        menu.addAction("全屏模式", self._toggle_fullscreen)
-        menu.addAction("保存配置", self._save_pref)
-        menu.addAction("恢复配置", self._restore_pref)
-        menu.addAction("退出", self._request_quit)
+    def _show_context_menu(self, pos):
+        global themeColors, fonts, alphaValues
+        if not isinstance(themeColors, dict):
+            themeColors = dict(DEFAULT_THEME_COLORS)
+        if not isinstance(fonts, dict):
+            fonts = dict(DEFAULT_FONTS)
+        if not isinstance(alphaValues, dict):
+            alphaValues = dict(DEFAULT_ALPHA_VALUES)
+        menu = QMenu(self)
+        menu.setStyleSheet(self._context_menu_style())
+        self._populate_menu_from_spec(menu, self._context_menu_spec())
         if hasattr(menu, "exec"):
             menu.exec(self.mapToGlobal(pos))
         else:
@@ -1891,7 +2521,22 @@ class WordWindow(QWidget):
         path.addRoundedRect(rect, self.word_radius, self.word_radius)
         painter.fillPath(path, QColor(self._active_bg))
 
-        painter.setPen(QPen(QColor("#F2C89B"), 2))
+        border_color = QColor("#F2C89B")
+        now = time.monotonic()
+        if now < self._sedentary_highlight_until:
+            pulse = 0.55 + 0.45 * abs(((now * 2.2) % 2.0) - 1.0)
+            border_color = QColor("#E58B6B")
+            border_color.setAlphaF(min(1.0, pulse))
+            glow_color = QColor("#FFD4C8")
+            glow_color.setAlpha(95)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(glow_color)
+            glow_path = QPainterPath()
+            glow_path.addRoundedRect(self.rect().adjusted(0, 0, 0, 0), self.word_radius + 2, self.word_radius + 2)
+            painter.drawPath(glow_path)
+            painter.fillPath(path, QColor(self._active_bg))
+
+        painter.setPen(QPen(border_color, 2))
         painter.drawPath(path)
 
         blossom = QColor("#FFD7E5")
@@ -1901,6 +2546,14 @@ class WordWindow(QWidget):
             painter.drawEllipse(x, y, 4, 4)
             painter.drawEllipse(x + 4, y + 2, 4, 4)
             painter.drawEllipse(x + 2, y + 6, 4, 4)
+
+        if self._sedentary_hint_text and now < self._sedentary_highlight_until:
+            hint_rect = QRect(26, max(10, self.height() - 34), max(100, self.width() - 88), 20)
+            painter.setPen(QColor("#C76752"))
+            hint_font = QFont(CHNfont, max(9, min(13, self.fs // 2)))
+            hint_font.setBold(True)
+            painter.setFont(hint_font)
+            painter.drawText(hint_rect, Qt.AlignLeft | Qt.AlignVCenter, self._sedentary_hint_text)
 
         self.cat_corner.move(self.width() - self.cat_corner.width() - 8, 8)
         super().paintEvent(event)
@@ -1960,6 +2613,12 @@ class WordWindow(QWidget):
         super().resizeEvent(event)
         self._fit_current_text_fonts()
         self._refresh_daily_count_label()
+        self._refresh_sedentary_label()
+        self._reposition_sedentary_dialog()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._reposition_sedentary_dialog()
 
     def keyPressEvent(self, event):
         if event.key() in {Qt.Key_Space, Qt.Key_Right}:
